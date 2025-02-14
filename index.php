@@ -4,7 +4,7 @@
   Plugin URI: https://www.wpadmincache.com
   Description: WP Admin Cache plugin with a separate "Manual Pages" tab, exact matching option, improved security, partial or exact matching, dynamic row addition for page durations, debug logs (with basic log rotation), strict prefetch security, manual purge buttons, scheme-unification for URLs, and no large LIKE query.
   Version: 1.0.0
-  Author: Grf Studio
+  Author: Jazir5
   Author URI: https://www.wpadmincache.com
   Text Domain: wp-admin-cache
   Domain Path: /languages/
@@ -71,10 +71,21 @@ class AdminCacheAllSuggestions {
 		add_action('admin_notices', array($this, 'maybeShowInvalidLinesNotice'));
 		add_action('admin_bar_menu', array($this, 'wp_admin_cache_add_admin_bar_menu'), 100);
 		add_action('admin_init', array($this, 'wp_admin_cache_handle_clear'));
+
+		// Register list table columns for built-in post types
 		add_filter( 'manage_posts_columns', array($this, 'wp_admin_cache_add_custom_column') );
 		add_filter( 'manage_pages_columns', array($this, 'wp_admin_cache_add_custom_column') );
 		add_action( 'manage_posts_custom_column', array($this, 'wp_admin_cache_render_custom_column'), 10, 2 );
 		add_action( 'manage_pages_custom_column', array($this, 'wp_admin_cache_render_custom_column'), 10, 2 );
+
+		// Register list table columns for custom post types
+		$custom_post_types = get_post_types( array( '_builtin' => false ), 'names' );
+		if ( ! empty( $custom_post_types ) ) {
+			foreach ( $custom_post_types as $cpt ) {
+				add_filter( "manage_{$cpt}_posts_columns", array($this, 'wp_admin_cache_add_custom_column') );
+				add_action( "manage_{$cpt}_posts_custom_column", array($this, 'wp_admin_cache_render_custom_column'), 10, 2 );
+			}
+		}
 
 		// Cleanup expired transients and registry.
 		$this->cleanupExpiredTransients();
@@ -122,6 +133,13 @@ class AdminCacheAllSuggestions {
 			}
 		}
 		return $new_columns;
+	}
+
+	public function wp_admin_cache_render_custom_column( $column, $post_id ) {
+		if ( 'wp_admin_cache_include' === $column ) {
+			$checked = get_post_meta( $post_id, '_wp_admin_cache_include', true ) ? 'checked' : '';
+			echo '<input type="checkbox" class="wp-admin-cache-include-toggle" data-postid="' . esc_attr( $post_id ) . '" ' . $checked . ' />';
+		}
 	}
 
 	/**
