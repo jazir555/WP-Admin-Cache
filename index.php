@@ -78,8 +78,7 @@ class AdminCacheAllSuggestions {
 	 */
 	private function normalizeUrl($url) {
 		$trimmed = trim($url);
-		// Remove any valid scheme per RFC (letters, digits, plus, period, or hyphen)
-		return preg_replace('/^[a-z][a-z0-9+\-.]*:\/\//i', '', $trimmed);
+		return preg_replace('/^https?:\/\//i', '', $trimmed);
 	}
 
 	/**
@@ -95,9 +94,6 @@ class AdminCacheAllSuggestions {
 		}
 	}
 
-	/**
-	 * Multi-site aware initialization of settings and registry.
-	 */
 	public static function maybeInitializeSettings() {
 		$raw = get_option('wp_admin_cache_settings');
 		$settings = is_string($raw) ? json_decode($raw, true) : array();
@@ -127,15 +123,9 @@ class AdminCacheAllSuggestions {
 			$detected = self::detectAdminPages();
 			$settings['enabled-urls'] = $detected;
 		}
-		// Initialize the registry option in a multisite‐aware way.
-		if (is_multisite()) {
-			if (!is_array(get_site_option('wp_admin_cache_registry'))) {
-				update_site_option('wp_admin_cache_registry', array());
-			}
-		} else {
-			if (!is_array(get_option('wp_admin_cache_registry'))) {
-				update_option('wp_admin_cache_registry', array());
-			}
+		// Always use the per-site registry
+		if (!is_array(get_option('wp_admin_cache_registry'))) {
+			update_option('wp_admin_cache_registry', array());
 		}
 		update_option('wp_admin_cache_settings', json_encode($settings));
 	}
@@ -193,11 +183,7 @@ class AdminCacheAllSuggestions {
 			usleep($wait);
 		}
 		$this->registryCache = $registry;
-		if (is_multisite()) {
-			update_site_option('wp_admin_cache_registry', $registry);
-		} else {
-			update_option('wp_admin_cache_registry', $registry);
-		}
+		update_option('wp_admin_cache_registry', $registry);
 		delete_transient('wp_admin_cache_registry_lock');
 	}
 
@@ -307,8 +293,14 @@ class AdminCacheAllSuggestions {
 		$line = trim($line);
 		if (filter_var($line, FILTER_VALIDATE_URL)) {
 			return true;
-		} elseif (substr($line, 0, 1) === '/' && strlen($line) >= 2) {
-			return true;
+		} elseif (substr($line, 0, 1) === '/') {
+			// Disallow if more than one leading slash
+			if (preg_match('#^/{2,}#', $line)) {
+				return false;
+			}
+			if (strlen($line) >= 2) {
+				return true;
+			}
 		}
 		return false;
 	}
@@ -318,20 +310,22 @@ class AdminCacheAllSuggestions {
 	 */
 	public static function detectAdminPages() {
 		global $menu, $submenu;
+		if (!isset($menu) || !is_array($menu)) {
+			$menu = array();
+		}
+		if (!isset($submenu) || !is_array($submenu)) {
+			$submenu = array();
+		}
 		$found = array();
-		if (is_array($menu)) {
-			foreach ($menu as $item) {
-				if (!empty($item[2])) {
-					$found[] = $item[2];
-				}
+		foreach ($menu as $item) {
+			if (!empty($item[2])) {
+				$found[] = $item[2];
 			}
 		}
-		if (is_array($submenu)) {
-			foreach ($submenu as $parent => $subItems) {
-				foreach ($subItems as $subItem) {
-					if (!empty($subItem[2])) {
-						$found[] = $subItem[2];
-					}
+		foreach ($submenu as $parent => $subItems) {
+			foreach ($subItems as $subItem) {
+				if (!empty($subItem[2])) {
+					$found[] = $subItem[2];
 				}
 			}
 		}
@@ -638,11 +632,7 @@ class AdminCacheAllSuggestions {
 	 */
 	private function getRegistry() {
 		if ($this->registryCache === null) {
-			if (is_multisite()) {
-				$this->registryCache = get_site_option('wp_admin_cache_registry', array());
-			} else {
-				$this->registryCache = get_option('wp_admin_cache_registry', array());
-			}
+			$this->registryCache = get_option('wp_admin_cache_registry', array());
 		}
 		return $this->registryCache;
 	}
@@ -680,7 +670,7 @@ class AdminCacheAllSuggestions {
 		foreach ($patterns as $pat) {
 			$pat = trim($pat);
 			if ($pat === '') continue;
-			if (strlen($pat) > 100) {
+			if (strlen($pat) > 80) {
 				$this->debugLog('Skipping regex: pattern too long: ' . $pat);
 				continue;
 			}
@@ -697,6 +687,7 @@ class AdminCacheAllSuggestions {
 		}
 		return false;
 	}
+
 	/**
 	 * Displays an admin notice if any invalid manual URLs have been stored.
 	 * This method retrieves a transient (named "wp_admin_cache_invalid_manual_lines") that is expected
