@@ -51,7 +51,7 @@ class AdminCacheAllSuggestions {
 		if ( ! is_admin() ) {
 			return;
 		}
-		self::$instance = $this; // NEW: Set the instance for later use
+		self::$instance = $this; // Set the instance for global access
 
 		// Load and parse settings.
 		$raw = get_option('wp_admin_cache_settings');
@@ -62,13 +62,20 @@ class AdminCacheAllSuggestions {
 		$this->enabled = ! empty($this->settings['enabled']);
 		$this->debugFile = WP_CONTENT_DIR . '/debug-wpadmincache.log';
 
-		// Register hooks.
+		// Register hooks (all callbacks are now class methods)
+		add_action( 'wp_ajax_wp_admin_cache_toggle_include', array($this, 'wp_admin_cache_ajax_toggle_include') );
+		add_action( 'admin_enqueue_scripts', array($this, 'wp_admin_cache_enqueue_admin_scripts') );
 		add_action('admin_menu', array($this, 'init'));
 		add_action('admin_print_footer_scripts', array($this, 'writeScripts'));
 		add_filter('plugin_action_links_' . plugin_basename(__FILE__), array($this, 'add_action_links'));
 		add_action('admin_notices', array($this, 'maybeShowInvalidLinesNotice'));
-		add_action('admin_bar_menu', 'wp_admin_cache_add_admin_bar_menu', 100);
-		add_action('admin_init', 'wp_admin_cache_handle_clear');
+		add_action('admin_bar_menu', array($this, 'wp_admin_cache_add_admin_bar_menu'), 100);
+		add_action('admin_init', array($this, 'wp_admin_cache_handle_clear'));
+		add_filter( 'manage_posts_columns', array($this, 'wp_admin_cache_add_custom_column') );
+		add_filter( 'manage_pages_columns', array($this, 'wp_admin_cache_add_custom_column') );
+		add_action( 'manage_posts_custom_column', array($this, 'wp_admin_cache_render_custom_column'), 10, 2 );
+		add_action( 'manage_pages_custom_column', array($this, 'wp_admin_cache_render_custom_column'), 10, 2 );
+
 		// Cleanup expired transients and registry.
 		$this->cleanupExpiredTransients();
 		$this->cleanupRegistry();
@@ -79,24 +86,92 @@ class AdminCacheAllSuggestions {
 		}
 	}
 	/**
+	 * AJAX handler for toggling cache inclusion.
+	 */
+	public function wp_admin_cache_ajax_toggle_include() {
+		check_ajax_referer( 'wp_admin_cache_toggle_nonce', 'nonce' );
+		$post_id = intval( $_POST['post_id'] );
+		$include = sanitize_text_field( $_POST['include'] );
+		if ( 'true' === $include ) {
+			update_post_meta( $post_id, '_wp_admin_cache_include', '1' );
+		} else {
+			delete_post_meta( $post_id, '_wp_admin_cache_include' );
+		}
+		wp_send_json_success();
+	}
+
+	/**
+	 * Render the content for the custom column.
+	 */
+	function wp_admin_cache_render_custom_column( $column, $post_id ) {
+		if ( 'wp_admin_cache_include' === $column ) {
+			$checked = get_post_meta( $post_id, '_wp_admin_cache_include', true ) ? 'checked' : '';
+			echo '<input type="checkbox" class="wp-admin-cache-include-toggle" data-postid="' . esc_attr( $post_id ) . '" ' . $checked . ' />';
+		}
+	}
+	/**
+	 * Add a custom column for cache inclusion.
+	 */
+	public function wp_admin_cache_add_custom_column( $columns ) {
+		$new_columns = array();
+		// Insert our column after the title column.
+		foreach ( $columns as $key => $value ) {
+			$new_columns[ $key ] = $value;
+			if ( 'title' === $key ) {
+				$new_columns['wp_admin_cache_include'] = __( 'Cache?', 'wp-admin-cache' );
+			}
+		}
+		return $new_columns;
+	}
+
+	/**
+	 * Enqueue admin script for handling cache-toggle via AJAX.
+	 */
+	/**
+	 * Enqueue admin script for handling cache-toggle via AJAX on edit screens only.
+	 */
+	public function wp_admin_cache_enqueue_admin_scripts( $hook ) {
+		$screen = get_current_screen();
+		// Only load on screens with base 'edit' (e.g., edit.php, edit.php?post_type=page, etc.)
+		if ( ! $screen || 'edit' !== $screen->base ) {
+			return;
+		}
+
+		wp_enqueue_script(
+			'wp-admin-cache-admin',
+			plugin_dir_url( __FILE__ ) . 'js/wp-admin-cache-admin.js',
+			array( 'jquery' ),
+			'1.0',
+			true
+		);
+		wp_localize_script(
+			'wp-admin-cache-admin',
+			'wpAdminCache',
+			array(
+				'ajax_url' => admin_url( 'admin-ajax.php' ),
+				'nonce'    => wp_create_nonce( 'wp_admin_cache_toggle_nonce' ),
+			)
+		);
+	}
+	/**
 	 * Add Clear Cache options to the Admin Bar.
 	 */
-	function wp_admin_cache_add_admin_bar_menu($wp_admin_bar) {
+	public function wp_admin_cache_add_admin_bar_menu($wp_admin_bar) {
 		if ( ! current_user_can('manage_options') ) {
 			return;
 		}
 		$nonce = wp_create_nonce('wp_admin_cache_clear_nonce');
 		$clear_current_url = add_query_arg(
 			array(
-				'wp_admin_cache_clear'  => 'current',
-				'wp_admin_cache_nonce'  => $nonce,
+				'wp_admin_cache_clear' => 'current',
+				'wp_admin_cache_nonce' => $nonce,
 			),
 			admin_url()
 		);
 		$clear_all_url = add_query_arg(
 			array(
-				'wp_admin_cache_clear'  => 'all',
-				'wp_admin_cache_nonce'  => $nonce,
+				'wp_admin_cache_clear' => 'all',
+				'wp_admin_cache_nonce' => $nonce,
 			),
 			admin_url()
 		);
@@ -116,7 +191,7 @@ class AdminCacheAllSuggestions {
 	/**
 	 * Handle Clear Cache requests triggered from the Admin Bar.
 	 */
-	function wp_admin_cache_handle_clear() {
+	public function wp_admin_cache_handle_clear() {
 		if ( ! is_admin() || ! isset($_GET['wp_admin_cache_clear'], $_GET['wp_admin_cache_nonce']) ) {
 			return;
 		}
@@ -125,7 +200,7 @@ class AdminCacheAllSuggestions {
 		}
 
 		$action = sanitize_text_field($_GET['wp_admin_cache_clear']);
-		$instance = AdminCacheAllSuggestions::get_instance();
+		$instance = self::get_instance();
 		if ( ! $instance ) {
 			return;
 		}
@@ -136,7 +211,6 @@ class AdminCacheAllSuggestions {
 		} else {
 			return;
 		}
-		// Redirect to the current admin URL without the query args.
 		$redirect = remove_query_arg(array('wp_admin_cache_clear', 'wp_admin_cache_nonce'));
 		wp_redirect($redirect);
 		exit;
