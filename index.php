@@ -173,16 +173,6 @@ class AdminCacheAllSuggestions {
 	}
 
 	/**
-	 * Get the cached registry, or load it.
-	 */
-	private function getRegistry() {
-		if ($this->registryCache === null) {
-			$this->registryCache = get_option('wp_admin_cache_registry', array());
-		}
-		return $this->registryCache;
-	}
-
-	/**
 	 * Update the registry cache and option.
 	 */
 	private function updateRegistry($registry) {
@@ -424,27 +414,6 @@ class AdminCacheAllSuggestions {
 		$this->debugLog('All caches purged site-wide (using registry).');
 	}
 
-	/**
-	 * Purge caches for the current user using the registry.
-	 */
-	public function purgeCurrentUserCache() {
-		$token = $this->getToken();
-		if (!$token) {
-			return;
-		}
-		$registry = $this->getRegistry();
-		$newReg = array();
-		foreach ($registry as $key) {
-			if (strpos($key, 'wp-admin-cached-' . $token . '-') === 0) {
-				delete_transient($key);
-			} else {
-				$newReg[] = $key;
-			}
-		}
-		$this->updateRegistry($newReg);
-		$this->debugLog("Cache purged for user token: $token (registry approach).");
-	}
-
 	public function widget_update_callback($instance, $new_instance, $old_instance) {
 		$this->purgeCurrentUserCache();
 		return $instance;
@@ -509,30 +478,6 @@ class AdminCacheAllSuggestions {
 		}
 		$this->currentCaching = $tName;
 		$this->debugLog('Caching new admin page: ' . $relative);
-	}
-
-	/** ----------------------------------------------------------------
-	 * End capturing output and store the transient.
-	 */
-	public function end($content) {
-		if (strpos($content, '</html>') === false) {
-			return $content;
-		}
-		$duration = $this->getDurationForCurrentPage();
-		$content = str_replace('</body>', '<!--wp-admin-cached:' . time() . '--></body>', $content);
-		$this->setCachedTransient($this->currentCaching, $content, 60 * $duration);
-		if (isset($_POST['wp_admin_cache_prefetch'])) {
-			if (!isset($_POST['prefetch_nonce']) || !wp_verify_nonce($_POST['prefetch_nonce'], 'wp_admin_cache_prefetch_nonce')) {
-				return 'Invalid nonce';
-			}
-			if (!empty($this->settings['strict-prefetch']) && !current_user_can('manage_options')) {
-				return 'Insufficient capability';
-			}
-			$this->debugLog('Page prefetched, stored for ' . $duration . ' minutes.');
-			return 'prefetching:' . (60 * $duration);
-		}
-		$this->debugLog('Page cached for ' . $duration . ' minutes.');
-		return $content;
 	}
 
 	/**
@@ -617,47 +562,6 @@ class AdminCacheAllSuggestions {
 	}
 
 	/**
-	 * Determine the cache duration for the current page.
-	 */
-	private function getDurationForCurrentPage() {
-		$currentFullUrl = preg_replace('/^https?:\/\//i', '', add_query_arg(null, null));
-		$adminUrlNoScheme = preg_replace('/^https?:\/\//i', '', admin_url());
-		$relative = str_replace($adminUrlNoScheme, '', $currentFullUrl);
-		$defaultDuration = (int)($this->settings['duration'] ?? 5);
-		$pageDurations = $this->settings['page_durations'] ?? array();
-		foreach ($pageDurations as $pageKey => $minutes) {
-			if (strpos($relative, trim($pageKey)) !== false) {
-				$this->debugLog('Partial match for custom duration: ' . $pageKey . ' => ' . $minutes . ' minutes');
-				return (int)$minutes;
-			}
-		}
-		return $defaultDuration;
-	}
-
-	/**
-	 * Check URL against an array of regex patterns.
-	 */
-	private function matchAnyRegex($url, $patterns) {
-		foreach ($patterns as $pat) {
-			$pat = trim($pat);
-			if ($pat === '') continue;
-			if (!preg_match('/^[@#\/].+[@#\/][imsxeuADSUXJ]*$/', $pat)) {
-				$this->debugLog('Skipping invalid regex (no delimiters): ' . $pat);
-				continue;
-			}
-			$result = @preg_match($pat, $url);
-			if ($result === false) {
-				$this->debugLog('Regex compile failed: ' . $pat);
-				continue;
-			}
-			if ($result === 1) {
-				return true;
-			}
-		}
-		return false;
-	}
-
-	/**
 	 * Retrieve the user's cache session token.
 	 */
 	private function getToken() {
@@ -684,20 +588,6 @@ class AdminCacheAllSuggestions {
 	// Finally, methods for purging caches using a registry.
 
 	/**
-	 * Purge all caches using the registry.
-	 */
-	public function purgeAllCaches() {
-		$registry = $this->getRegistry();
-		if (is_array($registry)) {
-			foreach ($registry as $key) {
-				delete_transient($key);
-			}
-		}
-		$this->updateRegistry(array());
-		$this->debugLog('All caches purged site-wide (using registry).');
-	}
-
-	/**
 	 * Purge caches for the current user.
 	 */
 	public function purgeCurrentUserCache() {
@@ -716,72 +606,6 @@ class AdminCacheAllSuggestions {
 		}
 		$this->updateRegistry($newReg);
 		$this->debugLog("Cache purged for user token: $token (registry approach).");
-	}
-
-	public function widget_update_callback($instance, $new_instance, $old_instance) {
-		$this->purgeCurrentUserCache();
-		return $instance;
-	}
-
-	/**
-	 * Begin capturing output.
-	 */
-	private function begin() {
-		if ($this->beginStarted) {
-			return;
-		}
-		ob_start(array($this, 'end'));
-		$token = $this->getToken();
-		if ($token === '') {
-			$this->debugLog('No session token found; caching disabled for this user.');
-			return;
-		}
-		$this->beginStarted = true;
-		$currentFullUrl = add_query_arg(null, null);
-		// Unify the scheme by stripping http/https.
-		$currentFullUrl = preg_replace('/^https?:\/\//i', '', $currentFullUrl);
-		$adminUrlNoScheme = preg_replace('/^https?:\/\//i', '', admin_url());
-		$relative = str_replace($adminUrlNoScheme, '', $currentFullUrl);
-		if (!$this->shouldCache($relative, $currentFullUrl)) {
-			ob_end_flush();
-			return;
-		}
-		if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['wp_admin_cache_prefetch'])) {
-			$this->purgeCurrentUserCache();
-			return;
-		}
-		$tName = 'wp-admin-cached-' . $token . '-' . md5($relative);
-		$content = get_transient($tName);
-		if (isset($_POST['wp_admin_cache_refresh']) && $_POST['wp_admin_cache_refresh'] == '1') {
-			$content = false;
-		}
-		if ($content !== false) {
-			if (isset($_POST['wp_admin_cache_prefetch'])) {
-				if (!isset($_POST['prefetch_nonce']) || !wp_verify_nonce($_POST['prefetch_nonce'], 'wp_admin_cache_prefetch_nonce')) {
-					die('Invalid nonce');
-				}
-				if (!empty($this->settings['strict-prefetch']) && !current_user_can('manage_options')) {
-					die('Insufficient capability for prefetch.');
-				}
-				preg_match('/--wp-admin-cached:(.*)--/', $content, $matches);
-				if (!empty($matches[1])) {
-					$timeCached = (int)$matches[1];
-					$defDuration = $this->settings['duration'] ?? 5;
-					$remaining = ($defDuration * 60) - (time() - $timeCached);
-					echo 'prefetched:' . max(0, $remaining);
-				}
-				$this->debugLog('Prefetch request for: ' . $relative);
-				die();
-			}
-			if (!empty($this->settings['show-label']) && $this->settings['show-label'] === '1') {
-				$content = str_replace('</body>', '<div class="wp-admin-cache-label">cached page</div></body>', $content);
-			}
-			echo $content;
-			$this->debugLog('Served cached admin page: ' . $relative);
-			die();
-		}
-		$this->currentCaching = $tName;
-		$this->debugLog('Caching new admin page: ' . $relative);
 	}
 
 	/**
@@ -816,93 +640,6 @@ class AdminCacheAllSuggestions {
 			$this->registryCache = get_option('wp_admin_cache_registry', array());
 		}
 		return $this->registryCache;
-	}
-
-	/**
-	 * Update the registry.
-	 */
-	private function updateRegistry($registry) {
-		$this->registryCache = $registry;
-		update_option('wp_admin_cache_registry', $registry);
-	}
-
-	/**
-	 * Instead of directly calling set_transient, register the key.
-	 */
-	private function setCachedTransient($key, $value, $expire) {
-		set_transient($key, $value, $expire);
-		$registry = $this->getRegistry();
-		if (!in_array($key, $registry, true)) {
-			$registry[] = $key;
-			$this->updateRegistry($registry);
-		}
-	}
-
-	/**
-	 * Should we cache this page?
-	 */
-	private function shouldCache($relativeUrl, $fullUrl) {
-		if (!empty($this->settings['only_cache_manually'])) {
-			$manualUrls = $this->settings['manual-urls'] ?? array();
-			$exactMatch = !empty($this->settings['exact_manual_match']);
-			foreach ($manualUrls as $line) {
-				if ($exactMatch) {
-					if ($this->normalizeUrl($fullUrl) === $this->normalizeUrl($line)) {
-						$this->debugLog('Exact match (normalized): ' . $fullUrl . ' == ' . $line);
-						return true;
-					}
-				} else {
-					if (stripos($this->normalizeUrl($fullUrl), $this->normalizeUrl($line)) !== false ||
-					    stripos($this->normalizeUrl($relativeUrl), $this->normalizeUrl($line)) !== false) {
-						$this->debugLog('Partial manual match: ' . $line);
-						return true;
-					}
-				}
-			}
-			$this->debugLog('Skipping (only_cache_manually) no manual line matched: ' . $fullUrl);
-			return false;
-		}
-		$alwaysSkip = array(
-			'post.php','post-new.php','media-new.php','plugin-install.php',
-			'theme-install.php','customize.php','user-edit.php','profile.php'
-		);
-		foreach ($alwaysSkip as $skip) {
-			if (false !== strpos($relativeUrl, $skip)) {
-				$this->debugLog('Skipping caching because in always-skip: ' . $skip);
-				return false;
-			}
-		}
-		$mode = $this->settings['mode'] ?? 'whitelist';
-		$enabledUrls = $this->settings['enabled-urls'] ?? array();
-		$excludedUrls = $this->settings['excluded-urls'] ?? array();
-		$regex = $this->settings['regex-urls'] ?? array();
-		$strictWL = !empty($this->settings['strict-whitelist']);
-		if ($mode === 'blacklist') {
-			if (in_array($relativeUrl, $excludedUrls, true)) {
-				$this->debugLog('Skipping because blacklisted: ' . $relativeUrl);
-				return false;
-			}
-			if ($this->matchAnyRegex($relativeUrl, $regex)) {
-				$this->debugLog('Skipping because matched exclude regex: ' . $relativeUrl);
-				return false;
-			}
-			return true;
-		} else {
-			if (in_array($relativeUrl, $enabledUrls, true)) {
-				$this->debugLog('Caching because explicitly in whitelist: ' . $relativeUrl);
-				return true;
-			}
-			if ($strictWL) {
-				$this->debugLog('Strict Whitelist is on, skipping: ' . $relativeUrl);
-				return false;
-			}
-			if ($this->matchAnyRegex($relativeUrl, $regex)) {
-				$this->debugLog('Caching because matched whitelist regex: ' . $relativeUrl);
-				return true;
-			}
-			$this->debugLog('Skipping because not in whitelist nor matched regex: ' . $relativeUrl);
-			return false;
-		}
 	}
 
 	/**
@@ -944,28 +681,6 @@ class AdminCacheAllSuggestions {
 			}
 		}
 		return false;
-	}
-
-	/**
-	 * Retrieve the user's cache session token.
-	 */
-	private function getToken() {
-		return isset($_COOKIE['wp-admin-cache-session']) ? sanitize_text_field($_COOKIE['wp-admin-cache-session']) : '';
-	}
-
-	/**
-	 * Write a debug log message (with basic file rotation) if debug mode is enabled.
-	 */
-	private function debugLog($message) {
-		if (empty($this->settings['debug-mode'])) {
-			return;
-		}
-		$timestamp = date('Y-m-d H:i:s');
-		$line = "[{$timestamp}] [WPAdminCache] " . $message . "\n";
-		if (file_exists($this->debugFile) && filesize($this->debugFile) > 5 * 1024 * 1024) {
-			file_put_contents($this->debugFile, "");
-		}
-		@error_log($line, 3, $this->debugFile);
 	}
 
 }
