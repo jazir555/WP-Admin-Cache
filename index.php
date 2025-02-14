@@ -38,12 +38,9 @@ class AdminCacheAllSuggestions {
 	private $beginStarted   = false;
 	private $currentCaching = '';
 	private $enabled        = false;
-
 	private $debugFile;
-
 	// We'll store invalid manual lines in a transient for admin notice.
 	private $invalidManualLines = array();
-
 	// Local cache for the transient registry to reduce option calls.
 	private $registryCache = null;
 
@@ -77,7 +74,7 @@ class AdminCacheAllSuggestions {
 	}
 
 	/**
-	 * Normalize a URL by stripping any scheme (e.g., http, https, ftp, custom schemes, etc.)
+	 * Normalize a URL by stripping any scheme (e.g., http, https, ftp, custom schemes, etc.).
 	 */
 	private function normalizeUrl($url) {
 		$trimmed = trim($url);
@@ -85,7 +82,7 @@ class AdminCacheAllSuggestions {
 		return preg_replace('/^[a-z][a-z0-9+\-.]*:\/\//i', '', $trimmed);
 	}
 
-	/** ----------------------------------------------------------------
+	/**
 	 * Move plugin to top.
 	 */
 	public static function movePluginAtTop() {
@@ -143,8 +140,9 @@ class AdminCacheAllSuggestions {
 		update_option('wp_admin_cache_settings', json_encode($settings));
 	}
 
-	/** ----------------------------------------------------------------
+	/**
 	 * Cleanup expired transients to avoid DB bloat.
+	 * This version uses a more robust method by checking the standard transient prefix.
 	 */
 	private function cleanupExpiredTransients() {
 		global $wpdb;
@@ -156,8 +154,11 @@ class AdminCacheAllSuggestions {
 			foreach ($results as $row) {
 				$timeoutVal = (int)$row->option_value;
 				if ($timeoutVal < $timeNow) {
-					$transientName = str_replace('_timeout_', '', $row->option_name);
-					delete_transient(str_replace('_transient_', '', $transientName));
+					$prefix = '_transient_timeout_';
+					if (strpos($row->option_name, $prefix) === 0) {
+						$transientKey = substr($row->option_name, strlen($prefix));
+						delete_transient($transientKey);
+					}
 				}
 			}
 		}
@@ -178,12 +179,12 @@ class AdminCacheAllSuggestions {
 	}
 
 	/**
-	 * Update the registry cache and option using a simple transient lock to reduce race conditions.
+	 * Update the registry cache and option using a transient lock.
+	 * Increased retries and wait time help mitigate race conditions.
 	 */
 	private function updateRegistry($registry) {
-		// Attempt to acquire a lock (with a max number of retries).
-		$maxRetries = 5;
-		$wait = 100000; // 0.1 second in microseconds
+		$maxRetries = 10;
+		$wait = 200000; // 0.2 second in microseconds
 		for ($i = 0; $i < $maxRetries; $i++) {
 			if (false === get_transient('wp_admin_cache_registry_lock')) {
 				set_transient('wp_admin_cache_registry_lock', true, 5);
@@ -200,8 +201,9 @@ class AdminCacheAllSuggestions {
 		delete_transient('wp_admin_cache_registry_lock');
 	}
 
-	/** ----------------------------------------------------------------
+	/**
 	 * Admin UI initialization. Also sets the cookie using COOKIEPATH/COOKIE_DOMAIN.
+	 * If headers are already sent, logs an error.
 	 */
 	public function init() {
 		add_options_page(
@@ -212,25 +214,20 @@ class AdminCacheAllSuggestions {
 			array($this, 'options_page')
 		);
 		$session = wp_get_session_token();
-		// Use "/" as cookie path during AJAX to avoid conflicts.
 		$cookiePath = (defined('DOING_AJAX') && DOING_AJAX) ? '/' : COOKIEPATH;
 		if (!isset($_COOKIE['wp-admin-cache-session']) || $_COOKIE['wp-admin-cache-session'] !== $session) {
-			@setcookie(
-				'wp-admin-cache-session',
-				$session,
-				0,
-				$cookiePath,
-				COOKIE_DOMAIN,
-				is_ssl(),
-				true
-			);
+			if (!headers_sent()) {
+				@setcookie('wp-admin-cache-session', $session, 0, $cookiePath, COOKIE_DOMAIN, is_ssl(), true);
+			} else {
+				$this->debugLog('Headers already sent; unable to set cache cookie.');
+			}
 			if (!isset($_COOKIE['wp-admin-cache-session'])) {
 				$this->debugLog('Could not set the admin cache cookie. Some caching may fail.');
 			}
 		}
 	}
 
-	/** ----------------------------------------------------------------
+	/**
 	 * Print JS for prefetch and embed CSS inline.
 	 */
 	public function writeScripts() {
@@ -255,22 +252,22 @@ class AdminCacheAllSuggestions {
             }
             .wp-admin-cache-label {
                 position: fixed;
-                bottom: 0px;
-                right: 0px;
+                bottom: 0;
+                right: 0;
                 background: #00DD00;
                 color: #fff;
                 z-index: 10000;
-                opacity: .5;
+                opacity: 0.5;
                 font-size: 11px;
                 font-weight: bold;
-                padding: 0px 5px;
+                padding: 0 5px;
                 pointer-events: none;
             }
         </style>
 		<?php
 	}
 
-	/** ----------------------------------------------------------------
+	/**
 	 * Add a settings link on the plugin page.
 	 */
 	public function add_action_links($links) {
@@ -280,14 +277,13 @@ class AdminCacheAllSuggestions {
 		return array_merge($links, $mylinks);
 	}
 
-	/** ----------------------------------------------------------------
+	/**
 	 * Settings page. (UI HTML is included separately via settings-page.php.)
 	 */
 	public function options_page() {
 		if (!current_user_can('manage_options')) {
 			return;
 		}
-		// Process manual purge requests...
 		if (isset($_POST['wp-admin-cache-manual-purge'])) {
 			check_admin_referer('wp_admin_cache_settings');
 			$which = sanitize_text_field($_POST['wp-admin-cache-manual-purge']);
@@ -299,15 +295,13 @@ class AdminCacheAllSuggestions {
 				$this->debugLog('Manual user-only purge triggered by user.');
 			}
 		}
-		// Process settings save (code omitted for brevity; see previous versions)
-		// ...
 		include_once __DIR__ . '/settings-page.php';
 	}
 
 	/**
 	 * Validate a manual URL.
-	 * For full URLs, use filter_var for proper validation;
-	 * allow relative paths (which must begin with "/") if at least 2 characters.
+	 * For full URLs, uses filter_var for proper validation;
+	 * allows relative paths (which must begin with "/") if at least 2 characters.
 	 */
 	private function validateManualLine($line) {
 		$line = trim($line);
@@ -319,8 +313,7 @@ class AdminCacheAllSuggestions {
 		return false;
 	}
 
-
-	/** ----------------------------------------------------------------
+	/**
 	 * detectAdminPages: Return an array of admin page slugs.
 	 */
 	public static function detectAdminPages() {
@@ -347,7 +340,7 @@ class AdminCacheAllSuggestions {
 		return array_values($found);
 	}
 
-	/** ----------------------------------------------------------------
+	/**
 	 * Build the prefetch list.
 	 */
 	private function getUrlsForPrefetch() {
@@ -392,7 +385,7 @@ class AdminCacheAllSuggestions {
 		return $urls;
 	}
 
-	/** ----------------------------------------------------------------
+	/**
 	 * Hook purge events.
 	 */
 	public function autoPurgeCache() {
@@ -422,10 +415,31 @@ class AdminCacheAllSuggestions {
 	}
 
 	/**
-	 * Instead of a large LIKE query, use a registry-based approach.
+	 * Purge caches for the current user.
+	 */
+	public function purgeCurrentUserCache() {
+		$token = $this->getToken();
+		if (!$token) {
+			return;
+		}
+		$registry = $this->getRegistry();
+		$newReg = array();
+		foreach ($registry as $key) {
+			if (strpos($key, 'wp-admin-cached-' . $token . '-') === 0) {
+				delete_transient($key);
+			} else {
+				$newReg[] = $key;
+			}
+		}
+		$this->updateRegistry($newReg);
+		$this->debugLog("Cache purged for user token: $token (registry approach).");
+	}
+
+	/**
+	 * Purge all caches using the multisite-aware registry.
 	 */
 	public function purgeAllCaches() {
-		$registry = get_option('wp_admin_cache_registry', array());
+		$registry = $this->getRegistry();
 		if (is_array($registry)) {
 			foreach ($registry as $key) {
 				delete_transient($key);
@@ -452,19 +466,19 @@ class AdminCacheAllSuggestions {
 		$token = $this->getToken();
 		if ($token === '') {
 			$this->debugLog('No session token found; caching disabled for this user.');
+			if (ob_get_length()) {
+				ob_end_clean();
+			}
 			return;
 		}
 		$this->beginStarted = true;
 		$currentFullUrl = add_query_arg(null, null);
-		// Normalize by stripping any scheme.
 		$currentFullUrlNormalized = $this->normalizeUrl($currentFullUrl);
 		$adminUrlNormalized = $this->normalizeUrl(admin_url());
-		// Use parse_url to extract paths (prepend a dummy scheme so parse_url works correctly)
 		$currentParsed = parse_url('http://' . $currentFullUrlNormalized);
 		$adminParsed   = parse_url('http://' . $adminUrlNormalized);
 		$currentPath = isset($currentParsed['path']) ? $currentParsed['path'] : '';
 		$adminPath   = isset($adminParsed['path']) ? $adminParsed['path'] : '';
-		// Remove the admin path from the current path to get a relative URL.
 		$relative = str_replace($adminPath, '', $currentPath);
 		if (!$this->shouldCache($relative, $currentFullUrlNormalized)) {
 			ob_end_flush();
@@ -522,7 +536,7 @@ class AdminCacheAllSuggestions {
 
 	/**
 	 * Should we cache this page?
-	 * For "only_cache_manually", we compare normalized (scheme-stripped) URLs.
+	 * For "only_cache_manually", compares normalized URLs.
 	 */
 	private function shouldCache($relativeUrl, $fullUrl) {
 		if (!empty($this->settings['only_cache_manually'])) {
@@ -545,7 +559,6 @@ class AdminCacheAllSuggestions {
 			$this->debugLog('Skipping (only_cache_manually) no manual line matched: ' . $fullUrl);
 			return false;
 		}
-		// Normal caching logic
 		$alwaysSkip = array(
 			'post.php','post-new.php','media-new.php','plugin-install.php',
 			'theme-install.php','customize.php','user-edit.php','profile.php'
@@ -598,8 +611,8 @@ class AdminCacheAllSuggestions {
 
 	/**
 	 * Write a debug log message if debug mode is on.
-	 * If the debug file exceeds 5MB, it is rotated (renamed) rather than simply cleared.
-	 * If the log directory isn’t writable, fallback to PHP’s error_log.
+	 * If the debug file exceeds 5MB, it is rotated (renamed with a timestamp) rather than simply cleared.
+	 * Falls back to PHP's error_log if the log directory is not writable.
 	 */
 	private function debugLog($message) {
 		if (empty($this->settings['debug-mode'])) {
@@ -613,58 +626,11 @@ class AdminCacheAllSuggestions {
 			return;
 		}
 		if (file_exists($this->debugFile) && filesize($this->debugFile) > 5 * 1024 * 1024) {
-			rename($this->debugFile, $this->debugFile . '.old');
+			$newName = $this->debugFile . '.' . date('Ymd_His');
+			rename($this->debugFile, $newName);
 			file_put_contents($this->debugFile, "");
 		}
 		@error_log($line, 3, $this->debugFile);
-	}
-
-	// ----------------------------------------------------------------
-	// Finally, methods for purging caches using a registry.
-
-	/**
-	 * Purge caches for the current user.
-	 */
-	public function purgeCurrentUserCache() {
-		$token = $this->getToken();
-		if (!$token) {
-			return;
-		}
-		$registry = $this->getRegistry();
-		$newReg = array();
-		foreach ($registry as $key) {
-			if (strpos($key, 'wp-admin-cached-' . $token . '-') === 0) {
-				delete_transient($key);
-			} else {
-				$newReg[] = $key;
-			}
-		}
-		$this->updateRegistry($newReg);
-		$this->debugLog("Cache purged for user token: $token (registry approach).");
-	}
-
-	/**
-	 * End capturing output and store the transient.
-	 */
-	public function end($content) {
-		if (strpos($content, '</html>') === false) {
-			return $content;
-		}
-		$duration = $this->getDurationForCurrentPage();
-		$content = str_replace('</body>', '<!--wp-admin-cached:' . time() . '--></body>', $content);
-		$this->setCachedTransient($this->currentCaching, $content, 60 * $duration);
-		if (isset($_POST['wp_admin_cache_prefetch'])) {
-			if (!isset($_POST['prefetch_nonce']) || !wp_verify_nonce($_POST['prefetch_nonce'], 'wp_admin_cache_prefetch_nonce')) {
-				return 'Invalid nonce';
-			}
-			if (!empty($this->settings['strict-prefetch']) && !current_user_can('manage_options')) {
-				return 'Insufficient capability';
-			}
-			$this->debugLog('Page prefetched, stored for ' . $duration . ' minutes.');
-			return 'prefetching:' . (60 * $duration);
-		}
-		$this->debugLog('Page cached for ' . $duration . ' minutes.');
-		return $content;
 	}
 
 	/**
@@ -708,33 +674,46 @@ class AdminCacheAllSuggestions {
 	/**
 	 * Check URL against an array of regex patterns.
 	 * Patterns longer than 100 characters are skipped to reduce the risk of DOS attacks.
+	 * Instead of a simplistic delimiter check, we simply test the pattern.
 	 */
 	private function matchAnyRegex($url, $patterns) {
 		foreach ($patterns as $pat) {
 			$pat = trim($pat);
 			if ($pat === '') continue;
-			// Limit pattern length
 			if (strlen($pat) > 100) {
 				$this->debugLog('Skipping regex: pattern too long: ' . $pat);
 				continue;
 			}
-			if (!preg_match('/^[@#\/].+[@#\/][imsxeuADSUXJ]*$/', $pat)) {
-				$this->debugLog('Skipping invalid regex (no delimiters): ' . $pat);
+			// Test the regex by attempting a dummy match
+			$test = @preg_match($pat, '');
+			if ($test === false) {
+				$this->debugLog('Invalid regex skipped: ' . $pat);
 				continue;
 			}
 			$result = @preg_match($pat, $url);
-			if ($result === false) {
-				$this->debugLog('Regex compile failed: ' . $pat);
-				continue;
-			}
 			if ($result === 1) {
 				return true;
 			}
 		}
 		return false;
 	}
+	/**
+	 * Displays an admin notice if any invalid manual URLs have been stored.
+	 * This method retrieves a transient (named "wp_admin_cache_invalid_manual_lines") that is expected
+	 * to contain an array of invalid manual URL strings, and then outputs a warning notice.
+	 */
+	public function maybeShowInvalidLinesNotice() {
+		$invalidLines = get_transient('wp_admin_cache_invalid_manual_lines');
+		if (!empty($invalidLines) && is_array($invalidLines)) {
+			echo '<div class="notice notice-warning is-dismissible"><p>' .
+			     esc_html(__('The following manual URLs are invalid: ', 'wp-admin-cache') . implode(', ', $invalidLines)) .
+			     '</p></div>';
+			// Clear the transient after displaying the notice.
+			delete_transient('wp_admin_cache_invalid_manual_lines');
+		}
+	}
 
 }
 
-// Finally instantiate the plugin
 new AdminCacheAllSuggestions();
+?>
