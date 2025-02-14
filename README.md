@@ -56,11 +56,6 @@ Uses transient locks to mitigate race conditions during registry updates.
 
 Provides debug logs (with basic log rotation when exceeding 5MB) for troubleshooting cache-related events.
 
-# Performance Optimizations
-
-
-Avoids large SQL LIKE queries by using a refined query and cleanup mechanism for expired transients.
-
 # Early Plugin Initialization
 
 Optionally moves itself to the top of the active plugins list for optimal operation.
