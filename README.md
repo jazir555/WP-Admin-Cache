@@ -62,4 +62,4 @@ Avoids large SQL LIKE queries by using a refined query and cleanup mechanism for
 
 # Early Plugin Initialization
 
-Moves itself to the top of the active plugins list for optimal operation.
+Optionally moves itself to the top of the active plugins list for optimal operation.
