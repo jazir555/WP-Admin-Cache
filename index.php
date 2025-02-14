@@ -10,6 +10,7 @@
   Domain Path: /languages/
   License:
  */
+
 if ( ! defined('ABSPATH') ) {
 	exit;
 }
@@ -35,7 +36,7 @@ function detect_plugin_activation($plugin, $network_activation) {
 }
 
 class AdminCacheAllSuggestions {
-
+	private static $instance = null; // NEW: Store the instance for global access
 	private $settings;
 	private $beginStarted   = false;
 	private $currentCaching = '';
@@ -50,6 +51,8 @@ class AdminCacheAllSuggestions {
 		if ( ! is_admin() ) {
 			return;
 		}
+		self::$instance = $this; // NEW: Set the instance for later use
+
 		// Load and parse settings.
 		$raw = get_option('wp_admin_cache_settings');
 		$this->settings = is_string($raw) ? json_decode($raw, true) : array();
@@ -64,7 +67,8 @@ class AdminCacheAllSuggestions {
 		add_action('admin_print_footer_scripts', array($this, 'writeScripts'));
 		add_filter('plugin_action_links_' . plugin_basename(__FILE__), array($this, 'add_action_links'));
 		add_action('admin_notices', array($this, 'maybeShowInvalidLinesNotice'));
-
+		add_action('admin_bar_menu', 'wp_admin_cache_add_admin_bar_menu', 100);
+		add_action('admin_init', 'wp_admin_cache_handle_clear');
 		// Cleanup expired transients and registry.
 		$this->cleanupExpiredTransients();
 		$this->cleanupRegistry();
@@ -73,6 +77,74 @@ class AdminCacheAllSuggestions {
 			$this->begin();
 			$this->autoPurgeCache();
 		}
+	}
+	/**
+	 * Add Clear Cache options to the Admin Bar.
+	 */
+	function wp_admin_cache_add_admin_bar_menu($wp_admin_bar) {
+		if ( ! current_user_can('manage_options') ) {
+			return;
+		}
+		$nonce = wp_create_nonce('wp_admin_cache_clear_nonce');
+		$clear_current_url = add_query_arg(
+			array(
+				'wp_admin_cache_clear'  => 'current',
+				'wp_admin_cache_nonce'  => $nonce,
+			),
+			admin_url()
+		);
+		$clear_all_url = add_query_arg(
+			array(
+				'wp_admin_cache_clear'  => 'all',
+				'wp_admin_cache_nonce'  => $nonce,
+			),
+			admin_url()
+		);
+
+		$wp_admin_bar->add_node(array(
+			'id'    => 'wp-admin-cache-clear-current',
+			'title' => 'Clear This Page Cache',
+			'href'  => $clear_current_url,
+		));
+		$wp_admin_bar->add_node(array(
+			'id'    => 'wp-admin-cache-clear-all',
+			'title' => 'Clear All Admin Caches',
+			'href'  => $clear_all_url,
+		));
+	}
+
+	/**
+	 * Handle Clear Cache requests triggered from the Admin Bar.
+	 */
+	function wp_admin_cache_handle_clear() {
+		if ( ! is_admin() || ! isset($_GET['wp_admin_cache_clear'], $_GET['wp_admin_cache_nonce']) ) {
+			return;
+		}
+		if ( ! wp_verify_nonce($_GET['wp_admin_cache_nonce'], 'wp_admin_cache_clear_nonce') ) {
+			wp_die('Security check failed');
+		}
+
+		$action = sanitize_text_field($_GET['wp_admin_cache_clear']);
+		$instance = AdminCacheAllSuggestions::get_instance();
+		if ( ! $instance ) {
+			return;
+		}
+		if ( $action === 'current' ) {
+			$instance->purgeCurrentUserCache();
+		} elseif ( $action === 'all' ) {
+			$instance->purgeAllCaches();
+		} else {
+			return;
+		}
+		// Redirect to the current admin URL without the query args.
+		$redirect = remove_query_arg(array('wp_admin_cache_clear', 'wp_admin_cache_nonce'));
+		wp_redirect($redirect);
+		exit;
+	}
+
+	// NEW: Getter for our instance.
+	public static function get_instance() {
+		return self::$instance;
 	}
 
 	/**
