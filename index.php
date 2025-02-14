@@ -1,11 +1,9 @@
 <?php
 /*
   Plugin Name: WP Admin Cache (Enhanced + Exact/Manual Tab + Scheme-Unification + No Large LIKE Query)
-  Plugin URI: https://www.wpadmincache.com
   Description: WP Admin Cache plugin with a separate "Manual Pages" tab, exact matching option, improved security, partial or exact matching, dynamic row addition for page durations, debug logs (with basic log rotation), strict prefetch security, manual purge buttons, scheme-unification for URLs, and no large LIKE query.
   Version: 1.0.0
   Author: Jazir5
-  Author URI: https://www.wpadmincache.com
   Text Domain: wp-admin-cache
   Domain Path: /languages/
   License:
