@@ -1,35 +1,36 @@
 <?php
 /*
-  Plugin Name: WP Admin Cache (Enhanced + Exact/Manual Tab)
+  Plugin Name: WP Admin Cache (Enhanced + Exact/Manual Tab + Scheme-Unification + No Large LIKE Query)
   Plugin URI: https://www.wpadmincache.com
-  Description: WP Admin Cache plugin with a separate "Manual Pages" tab, exact matching option, and basic validation for manual lines. Also includes multiple purge events, user-specific toggles, partial or exact matching, tabbed UI, dynamic row addition, debug logs, strict prefetch security, and manual purge buttons.
-  Version: 0.8.0
+  Description: WP Admin Cache plugin with a separate "Manual Pages" tab, exact matching option, improved security, partial or exact matching, dynamic row addition for page durations, debug logs, strict prefetch security, manual purge buttons, scheme-unification for URLs, and no large LIKE query.
+  Version: 1.0.0
   Author: Grf Studio
-  Author URI: https://www.grfstudio.com
+  Author URI: https://www.wpadmincache.com
   Text Domain: wp-admin-cache
   Domain Path: /languages/
   License:
  */
 
-if (!function_exists('add_action')) {
+// Prevent direct access
+if (!defined('WPINC')) {
 	exit;
 }
 
-/**
- * On plugin activation, move plugin to top and (optionally) auto-detect all admin pages.
- */
+// Activation Hook
 register_activation_hook(__FILE__, 'wp_admin_cache_all_suggestions_activation');
 function wp_admin_cache_all_suggestions_activation() {
 	AdminCacheAllSuggestions::movePluginAtTop();
 	AdminCacheAllSuggestions::maybeInitializeSettings();
+	// Optionally run a version check or run migrations if needed
 }
 
+// Detect Plugin Activation
+add_action('activated_plugin', 'detect_plugin_activation', 10, 2);
 function detect_plugin_activation($plugin, $network_activation) {
 	if ($plugin === 'wp-admin-cache/index.php' || $plugin === plugin_basename(__FILE__)) {
 		AdminCacheAllSuggestions::movePluginAtTop();
 	}
 }
-add_action('activated_plugin', 'detect_plugin_activation', 10, 2);
 
 class AdminCacheAllSuggestions {
 
@@ -38,23 +39,30 @@ class AdminCacheAllSuggestions {
 	private $currentCaching = '';
 	private $enabled        = false;
 
-	private $debugFile = WP_CONTENT_DIR . '/debug-wpadmincache.log';
+	private $debugFile;
 
 	// We'll store invalid lines in a transient array after form submission, to display a notice.
 	private $invalidManualLines = array();
 
 	public function __construct() {
+		// This plugin only runs in admin
 		if (!is_admin()) {
 			return;
 		}
+
+		// Load and parse settings
 		$raw = get_option('wp_admin_cache_settings');
-		$this->settings = json_decode($raw, true);
+		$this->settings = is_string($raw) ? json_decode($raw, true) : array();
 		if (!is_array($this->settings)) {
 			$this->settings = array();
 		}
 
 		$this->enabled = !empty($this->settings['enabled']);
 
+		// Debug file defaults to wp-content/debug-wpadmincache.log
+		$this->debugFile = WP_CONTENT_DIR . '/debug-wpadmincache.log';
+
+		// Register admin-related hooks
 		add_action('admin_menu', array($this, 'init'));
 		add_action('admin_print_footer_scripts', array($this, 'writeScripts'));
 		add_filter('plugin_action_links_' . plugin_basename(__FILE__), array($this, 'add_action_links'));
@@ -62,33 +70,16 @@ class AdminCacheAllSuggestions {
 		// Show invalid lines notice if any
 		add_action('admin_notices', array($this, 'maybeShowInvalidLinesNotice'));
 
+		// Attempt to cleanup old transients on each load (optional approach if you still want).
+		$this->cleanupExpiredTransients();
+
 		if ($this->enabled) {
 			$this->begin();
 			$this->autoPurgeCache();
 		}
 	}
 
-	/** --------------------------------------
-	 * If we have invalid lines stored, show an admin notice
-	 */
-	public function maybeShowInvalidLinesNotice() {
-		$invalid = get_transient('wp_admin_cache_invalid_manual_lines');
-		if (!empty($invalid) && is_array($invalid)) {
-			delete_transient('wp_admin_cache_invalid_manual_lines');
-			?>
-			<div class="notice notice-error is-dismissible">
-				<p><strong><?php _e('Some manual pages were invalid and removed:', 'wp-admin-cache'); ?></strong></p>
-				<ul>
-					<?php foreach ($invalid as $line): ?>
-						<li><?php echo esc_html($line); ?></li>
-					<?php endforeach; ?>
-				</ul>
-			</div>
-			<?php
-		}
-	}
-
-	/** --------------------------------------
+	/** ----------------------------------------------------------------
 	 * Move plugin to top
 	 */
 	public static function movePluginAtTop() {
@@ -101,104 +92,111 @@ class AdminCacheAllSuggestions {
 		}
 	}
 
-	/** --------------------------------------
-	 * Default settings
+	/** ----------------------------------------------------------------
+	 * maybeInitializeSettings
 	 */
 	public static function maybeInitializeSettings() {
 		$raw = get_option('wp_admin_cache_settings');
-		$settings = json_decode($raw, true);
-
+		$settings = is_string($raw) ? json_decode($raw, true) : array();
 		if (!is_array($settings)) {
-			$settings = array(
-				'enabled'            => false,
-				'mode'               => 'whitelist',
-				'enabled-urls'       => array(),
-				'excluded-urls'      => array(),
-				'regex-urls'         => array(),
-				'duration'           => 5,
-				'show-label'         => '0',
-				'full_purge_events'  => array(),
-				'user_purge_events'  => array(),
-				'page_durations'     => array(),
-				'debug-mode'         => false,
-				'strict-prefetch'    => false,
-				'strict-whitelist'   => false,
-				'only_cache_manually'=> false,
-				'manual-urls'        => array(),
-				// New exact manual match setting
-				'exact_manual_match' => false,
-			);
+			$settings = array();
 		}
 
-		if (empty($settings['enabled-urls']) && ($settings['mode'] === 'whitelist')) {
+		// If missing, fill defaults
+		$defaults = array(
+			'enabled'            => false,
+			'mode'               => 'whitelist',
+			'enabled-urls'       => array(),
+			'excluded-urls'      => array(),
+			'regex-urls'         => array(),
+			'duration'           => 5,
+			'show-label'         => '0',
+			'full_purge_events'  => array(),
+			'user_purge_events'  => array(),
+			'page_durations'     => array(),
+			'debug-mode'         => false,
+			'strict-prefetch'    => false,
+			'strict-whitelist'   => false,
+			'only_cache_manually'=> false,
+			'manual-urls'        => array(),
+			'exact_manual_match' => false
+		);
+
+		// Merge any missing keys
+		$settings = array_merge($defaults, $settings);
+
+		// If empty whitelist, attempt autodetect
+		if (empty($settings['enabled-urls']) && $settings['mode'] === 'whitelist') {
 			$detected = self::detectAdminPages();
 			$settings['enabled-urls'] = $detected;
 		}
 
-		foreach (array('excluded-urls','full_purge_events','user_purge_events','page_durations','manual-urls') as $key) {
-			if (!isset($settings[$key]) || !is_array($settings[$key])) {
-				$settings[$key] = array();
-			}
-		}
-		if (!isset($settings['debug-mode'])) {
-			$settings['debug-mode'] = false;
-		}
-		if (!isset($settings['strict-prefetch'])) {
-			$settings['strict-prefetch'] = false;
-		}
-		if (!isset($settings['strict-whitelist'])) {
-			$settings['strict-whitelist'] = false;
-		}
-		if (!isset($settings['only_cache_manually'])) {
-			$settings['only_cache_manually'] = false;
-		}
-		if (!isset($settings['exact_manual_match'])) {
-			$settings['exact_manual_match'] = false;
+		// Also init the registry for caching keys if not present:
+		if (!is_array(get_option('wp_admin_cache_registry'))) {
+			update_option('wp_admin_cache_registry', array());
 		}
 
 		update_option('wp_admin_cache_settings', json_encode($settings));
 	}
 
-	/** --------------------------------------
-	 * Admin menu
+	/** ----------------------------------------------------------------
+	 * Cleanup Expired Transients - optional
+	 */
+	private function cleanupExpiredTransients() {
+		// You can remove or keep this if you want minimal overhead
+		global $wpdb;
+		$timeNow = time();
+		$like = $wpdb->esc_like('_transient_timeout_wp-admin-cached-') . '%';
+		$sql  = "SELECT option_name, option_value FROM {$wpdb->options} WHERE option_name LIKE %s";
+		$results = $wpdb->get_results($wpdb->prepare($sql, $like));
+		if ($results) {
+			foreach ($results as $row) {
+				$timeoutVal = (int)$row->option_value;
+				if ($timeoutVal < $timeNow) {
+					$transientName = str_replace('_timeout_', '', $row->option_name);
+					delete_transient(str_replace('_transient_', '', $transientName));
+				}
+			}
+		}
+	}
+
+	/** ----------------------------------------------------------------
+	 * Admin UI initialization
 	 */
 	public function init() {
 		add_options_page(
-			'WP Admin Cache (Enhanced)',
-			'WP Admin Cache',
+			__('WP Admin Cache (Enhanced)', 'wp-admin-cache'),
+			__('WP Admin Cache', 'wp-admin-cache'),
 			'manage_options',
 			'wp-admin-cache',
 			array($this, 'options_page')
 		);
 
-		wp_enqueue_script(
-			'wp-admin-cache-script',
-			plugin_dir_url(__FILE__) . 'index.js',
-			array('jquery'),
-			'0.8.0',
-			true
-		);
-		wp_enqueue_style(
-			'wp-admin-cache-style',
-			plugin_dir_url(__FILE__) . 'index.css',
-			array(),
-			'0.8.0'
-		);
-
+		// Attempt to set cookie
 		$session = wp_get_session_token();
-		if (!isset($_COOKIE['wp-admin-cache-session']) || $_COOKIE['wp-admin-cache-session'] != $session) {
-			setcookie('wp-admin-cache-session', $session, 0, admin_url());
+		if (!isset($_COOKIE['wp-admin-cache-session']) || $_COOKIE['wp-admin-cache-session'] !== $session) {
+			@setcookie(
+				'wp-admin-cache-session',
+				$session,
+				0,
+				COOKIEPATH,
+				COOKIE_DOMAIN,
+				is_ssl(),
+				true
+			);
+			if (!isset($_COOKIE['wp-admin-cache-session'])) {
+				$this->debugLog('Could not set the admin cache cookie. Some caching may fail.');
+			}
 		}
 	}
 
-	/** --------------------------------------
-	 * Print JS for prefetch
+	/** ----------------------------------------------------------------
+	 * Print JS + inline CSS
 	 */
 	public function writeScripts() {
 		if ($this->enabled) {
 			$urls  = $this->getUrlsForPrefetch();
 			$nonce = wp_create_nonce('wp_admin_cache_prefetch_nonce');
-
 			if (!empty($urls)) {
 				echo '<script>';
 				echo 'var wpAdminCachePrefetchNonce = "' . esc_js($nonce) . '";';
@@ -209,30 +207,72 @@ class AdminCacheAllSuggestions {
 				echo ']);</script>';
 			}
 		}
+		?>
+        <style>
+            .wp-admin-cache-pageList {
+                background-color: rgba(255, 255, 255, 0.7);
+                padding: 5px;
+            }
+            .wp-admin-cache-label {
+                position: fixed;
+                bottom: 0px;
+                right: 0px;
+                background: #00DD00;
+                color: #fff;
+                z-index: 10000;
+                opacity: .5;
+                font-size: 11px;
+                font-weight: bold;
+                padding: 0px 5px;
+                pointer-events: none;
+            }
+        </style>
+		<?php
 	}
 
-	/** --------------------------------------
-	 * Link on plugins page
+	/** ----------------------------------------------------------------
+	 * Link on plugin page
 	 */
 	public function add_action_links($links) {
 		$mylinks = array(
-			'<a href="' . esc_url('options-general.php?page=wp-admin-cache') . '">' . __('Settings', 'grfwpt') . '</a>',
+			'<a href="' . esc_url('options-general.php?page=wp-admin-cache') . '">' . __('Settings', 'wp-admin-cache') . '</a>',
 		);
 		return array_merge($links, $mylinks);
 	}
 
-	/** --------------------------------------
-	 * Settings page
+	/** ----------------------------------------------------------------
+	 * Maybe show invalid lines
+	 */
+	public function maybeShowInvalidLinesNotice() {
+		$invalid = get_transient('wp_admin_cache_invalid_manual_lines');
+		if (!empty($invalid) && is_array($invalid)) {
+			delete_transient('wp_admin_cache_invalid_manual_lines');
+			?>
+            <div class="notice notice-error is-dismissible">
+                <p><strong><?php _e('Some manual pages were invalid and removed:', 'wp-admin-cache'); ?></strong></p>
+                <ul>
+					<?php foreach ($invalid as $line): ?>
+                        <li><?php echo esc_html($line); ?></li>
+					<?php endforeach; ?>
+                </ul>
+            </div>
+			<?php
+		}
+	}
+
+	/** ----------------------------------------------------------------
+	 * The main settings page
 	 */
 	public function options_page() {
 		if (!current_user_can('manage_options')) {
 			return;
 		}
 
-		// Manual purge?
+		// Manual Purge
 		if (isset($_POST['wp-admin-cache-manual-purge'])) {
 			check_admin_referer('wp_admin_cache_settings');
-			if ($_POST['wp-admin-cache-manual-purge'] === 'site') {
+			$which = sanitize_text_field($_POST['wp-admin-cache-manual-purge']);
+			if ($which === 'site') {
 				$this->purgeAllCaches();
 				$this->debugLog('Manual site-wide purge triggered by user.');
 			} else {
@@ -241,7 +281,7 @@ class AdminCacheAllSuggestions {
 			}
 		}
 
-		// Save settings
+		// Save Settings
 		if (isset($_POST['wp-admin-cache-save-settings'])) {
 			check_admin_referer('wp_admin_cache_settings');
 
@@ -255,11 +295,27 @@ class AdminCacheAllSuggestions {
 			$onlyManually     = !empty($_POST['only_cache_manually']) ? true : false;
 			$exactManualMatch = !empty($_POST['exact_manual_match']) ? true : false;
 
-			$enabledUrls = isset($_POST['enabled_urls']) ? array_map('sanitize_text_field', $_POST['enabled_urls']) : array();
-			$excludedUrls= isset($_POST['excluded_urls']) ? array_map('sanitize_text_field', $_POST['excluded_urls']) : array();
-			$regexUrls   = isset($_POST['regex_urls'])
-				? array_map('sanitize_text_field', explode("\n", $_POST['regex_urls']))
-				: array();
+			$enabledUrls = array();
+			if (!empty($_POST['enabled_urls']) && is_array($_POST['enabled_urls'])) {
+				foreach ($_POST['enabled_urls'] as $url) {
+					$enabledUrls[] = sanitize_text_field($url);
+				}
+			}
+			$excludedUrls = array();
+			if (!empty($_POST['excluded_urls']) && is_array($_POST['excluded_urls'])) {
+				foreach ($_POST['excluded_urls'] as $url) {
+					$excludedUrls[] = sanitize_text_field($url);
+				}
+			}
+			// Regex lines
+			$regexLines = isset($_POST['regex_urls']) ? explode("\n", $_POST['regex_urls']) : array();
+			$regexUrls  = array();
+			foreach ($regexLines as $pat) {
+				$pat = trim($pat);
+				if (!empty($pat)) {
+					$regexUrls[] = $pat;
+				}
+			}
 
 			// Full purge events
 			$possibleFull = $this->getPossibleFullPurgeEvents();
@@ -272,7 +328,7 @@ class AdminCacheAllSuggestions {
 				}
 			}
 
-			// User-specific purge events
+			// User purge events
 			$possibleUser = $this->getPossibleUserPurgeEvents();
 			$selectedUser = array();
 			if (!empty($_POST['user_purge_events']) && is_array($_POST['user_purge_events'])) {
@@ -283,28 +339,26 @@ class AdminCacheAllSuggestions {
 				}
 			}
 
-			// Page durations
+			// Page durations - now we expect: page_durations[0][key], page_durations[0][value]...
 			$pageDurations = array();
-			if (!empty($_POST['page_durations'])) {
-				foreach ($_POST['page_durations'] as $pageKey => $minutesStr) {
-					$pageKey   = sanitize_text_field($pageKey);
-					$minutes   = absint($minutesStr);
-					if ($pageKey !== '' && $minutes > 0) {
-						$pageDurations[$pageKey] = $minutes;
+			if (!empty($_POST['page_durations']) && is_array($_POST['page_durations'])) {
+				foreach ($_POST['page_durations'] as $row) {
+					$key   = isset($row['key']) ? trim(sanitize_text_field($row['key'])) : '';
+					$value = isset($row['value']) ? absint($row['value']) : 0;
+					if ($key !== '' && $value > 0) {
+						$pageDurations[$key] = $value;
 					}
 				}
 			}
 
 			// Manual-only pages
 			$manualUrls = array();
-			$invalidLines = array(); // track invalid lines
-
+			$invalidLines = array();
 			if (!empty($_POST['manual_urls'])) {
 				$lines = explode("\n", $_POST['manual_urls']);
-				foreach ($lines as $line) {
-					$lineTrim = trim($line);
+				foreach ($lines as $rawLine) {
+					$lineTrim = trim($rawLine);
 					if ($lineTrim !== '') {
-						// Validate it
 						if (!$this->validateManualLine($lineTrim)) {
 							$invalidLines[] = $lineTrim;
 						} else {
@@ -313,8 +367,6 @@ class AdminCacheAllSuggestions {
 					}
 				}
 			}
-
-			// If invalid lines found, store them in a transient to display a notice
 			if (!empty($invalidLines)) {
 				set_transient('wp_admin_cache_invalid_manual_lines', $invalidLines, 60);
 			}
@@ -341,328 +393,38 @@ class AdminCacheAllSuggestions {
 			update_option('wp_admin_cache_settings', json_encode($newSettings));
 			$this->settings = $newSettings;
 			$this->enabled  = $enabled;
+
 			$this->debugLog('Settings saved/updated.');
 		}
 
-		// Load settings
-		$mode             = $this->settings['mode']               ?? 'whitelist';
-		$enabled          = !empty($this->settings['enabled']);
-		$duration         = $this->settings['duration']           ?? 5;
-		$show_label       = $this->settings['show-label']         ?? '0';
-		$enabledUrls      = $this->settings['enabled-urls']       ?? array();
-		$excludedUrls     = $this->settings['excluded-urls']      ?? array();
-		$regexUrls        = $this->settings['regex-urls']         ?? array();
-		$chosenFull       = $this->settings['full_purge_events']  ?? array();
-		$allFullEvents    = $this->getPossibleFullPurgeEvents();
-		$chosenUser       = $this->settings['user_purge_events']  ?? array();
-		$allUserEvents    = $this->getPossibleUserPurgeEvents();
-		$pageDurations    = $this->settings['page_durations']     ?? array();
-		$debugMode        = !empty($this->settings['debug-mode']);
-		$strictPref       = !empty($this->settings['strict-prefetch']);
-		$strictWL         = !empty($this->settings['strict-whitelist']);
-		$onlyManually     = !empty($this->settings['only_cache_manually']);
-		$manualUrls       = $this->settings['manual-urls']        ?? array();
-		$exactManualMatch = !empty($this->settings['exact_manual_match']);
-
-		$allDetectedPages = self::detectAdminPages();
-
-		$regexString   = implode("\n", $regexUrls);
-		$manualUrlsStr = implode("\n", $manualUrls);
-
-		?>
-		<div class="wrap">
-			<h1><?php _e('WP Admin Cache Settings (Manual Tab + Exact Matching)', 'grfwpt'); ?></h1>
-
-			<!-- Manual Purge Buttons -->
-			<form method="post" style="margin-bottom:1em;">
-				<?php wp_nonce_field('wp_admin_cache_settings'); ?>
-				<input type="hidden" name="wp-admin-cache-manual-purge" value="site" />
-				<button class="button button-secondary" type="submit">
-					<?php _e('Manual Site-Wide Purge', 'grfwpt'); ?>
-				</button>
-			</form>
-			<form method="post" style="margin-bottom:2em;">
-				<?php wp_nonce_field('wp_admin_cache_settings'); ?>
-				<input type="hidden" name="wp-admin-cache-manual-purge" value="user" />
-				<button class="button button-secondary" type="submit">
-					<?php _e('Manual User-Only Purge', 'grfwpt'); ?>
-				</button>
-			</form>
-
-			<form method="post">
-				<?php wp_nonce_field('wp_admin_cache_settings'); ?>
-
-				<h2 class="nav-tab-wrapper wac-tab-nav">
-					<a href="#wac-tab-basic" class="nav-tab nav-tab-active">Basic Settings</a>
-					<a href="#wac-tab-purge" class="nav-tab">Purge Events</a>
-					<a href="#wac-tab-advanced" class="nav-tab">Advanced</a>
-					<a href="#wac-tab-manual" class="nav-tab">Manual Pages</a>
-				</h2>
-
-				<!-- Basic Settings Tab -->
-				<div id="wac-tab-basic" class="wac-tab-content" style="display:block;">
-					<table class="form-table">
-						<tr>
-							<th><?php _e('Enable Admin Caching', 'grfwpt'); ?></th>
-							<td>
-								<input type="checkbox" name="enabled" value="1" <?php checked($enabled, true); ?> />
-							</td>
-						</tr>
-						<tr>
-							<th><?php _e('Caching Mode', 'grfwpt'); ?></th>
-							<td>
-								<select name="cache_mode">
-									<option value="whitelist" <?php selected($mode, 'whitelist'); ?>>Whitelist</option>
-									<option value="blacklist" <?php selected($mode, 'blacklist'); ?>>Blacklist</option>
-								</select>
-								<p class="description">
-									<?php _e('Ignored if "Only Cache Manually" is enabled', 'grfwpt'); ?>
-								</p>
-							</td>
-						</tr>
-						<tr>
-							<th><?php _e('Default Cache Duration (minutes)', 'grfwpt'); ?></th>
-							<td>
-								<input type="number" name="duration" value="<?php echo esc_attr($duration); ?>" min="1" />
-							</td>
-						</tr>
-						<tr>
-							<th><?php _e('Show "Cached Page" Label?', 'grfwpt'); ?></th>
-							<td>
-								<input type="checkbox" name="show_label" value="1" <?php checked($show_label, '1'); ?> />
-							</td>
-						</tr>
-						<tr>
-							<th><?php _e('Debug Mode?', 'grfwpt'); ?></th>
-							<td>
-								<label><input type="checkbox" name="debug_mode" value="1" <?php checked($debugMode, true); ?> />
-									<?php _e('Log cache actions', 'grfwpt'); ?></label>
-							</td>
-						</tr>
-						<tr>
-							<th><?php _e('Strict Prefetch Security?', 'grfwpt'); ?></th>
-							<td>
-								<label><input type="checkbox" name="strict_prefetch" value="1" <?php checked($strictPref, true); ?> />
-									<?php _e('Require capability check + nonce to allow prefetching', 'grfwpt'); ?></label>
-							</td>
-						</tr>
-						<tr>
-							<th><?php _e('Strict Whitelist?', 'grfwpt'); ?></th>
-							<td>
-								<label><input type="checkbox" name="strict_whitelist" value="1" <?php checked($strictWL, true); ?> />
-									<?php _e('Don’t fallback to partial or regex if page not explicitly listed', 'grfwpt'); ?></label>
-							</td>
-						</tr>
-						<tr>
-							<th><?php _e('Only Cache Manually Specified Pages?', 'grfwpt'); ?></th>
-							<td>
-								<label><input type="checkbox" name="only_cache_manually" value="1" <?php checked($onlyManually, true); ?> />
-									<?php _e('Ignore all whitelists, blacklists, regex, durations, unless page is in Manual Pages tab.', 'grfwpt'); ?></label>
-							</td>
-						</tr>
-					</table>
-				</div><!-- #wac-tab-basic -->
-
-				<!-- Purge Events Tab -->
-				<div id="wac-tab-purge" class="wac-tab-content" style="display:none;">
-					<h2><?php _e('Full Purge Events', 'grfwpt'); ?></h2>
-					<p><?php _e('These events will purge caches for ALL users.', 'grfwpt'); ?></p>
-					<?php foreach ($allFullEvents as $hookName => $hookLabel):
-						$isChecked = in_array($hookName, $chosenFull, true);
-						?>
-						<label style="display:block;margin-left:20px;">
-							<input type="checkbox" name="full_purge_events[]"
-							       value="<?php echo esc_attr($hookName); ?>"
-								<?php checked($isChecked, true); ?> />
-							<?php echo esc_html($hookLabel); ?>
-						</label>
-					<?php endforeach; ?>
-
-					<hr>
-					<h2><?php _e('User-Specific Purge Events', 'grfwpt'); ?></h2>
-					<p><?php _e('These events will purge only the current user’s admin cache.', 'grfwpt'); ?></p>
-					<?php foreach ($allUserEvents as $hookName => $hookLabel):
-						$isChecked = in_array($hookName, $chosenUser, true);
-						?>
-						<label style="display:block;margin-left:20px;">
-							<input type="checkbox" name="user_purge_events[]"
-							       value="<?php echo esc_attr($hookName); ?>"
-								<?php checked($isChecked, true); ?> />
-							<?php echo esc_html($hookLabel); ?>
-						</label>
-					<?php endforeach; ?>
-				</div><!-- #wac-tab-purge -->
-
-				<!-- Advanced Tab -->
-				<div id="wac-tab-advanced" class="wac-tab-content" style="display:none;">
-					<h2><?php _e('Per-Page Durations (Partial Matching)', 'grfwpt'); ?></h2>
-					<p class="description">
-						<?php _e('Ignored if "Only Cache Manually" is enabled, unless the page is also in the Manual list.', 'grfwpt'); ?>
-					</p>
-
-					<table id="wac-durations-table" class="widefat">
-						<thead>
-						<tr>
-							<th><?php _e('Admin Page or Pattern', 'grfwpt'); ?></th>
-							<th><?php _e('Minutes', 'grfwpt'); ?></th>
-						</tr>
-						</thead>
-						<tbody>
-						<?php
-						$rowsToShow = array_keys($pageDurations);
-						if (!in_array('', $rowsToShow, true)) {
-							$rowsToShow[] = '';
-						}
-						foreach ($rowsToShow as $pageKey) {
-							$minutesVal = isset($pageDurations[$pageKey]) ? $pageDurations[$pageKey] : '';
-							?>
-							<tr>
-								<td>
-									<input type="text" name="page_durations[<?php echo esc_attr($pageKey); ?>]"
-									       value="<?php echo esc_attr($minutesVal); ?>"
-									       placeholder="e.g. index.php or edit.php?post_type=product" />
-								</td>
-								<td>
-									<input type="number" name="page_durations[<?php echo esc_attr($pageKey); ?>]"
-									       value="<?php echo esc_attr($minutesVal); ?>" min="0" />
-								</td>
-							</tr>
-							<?php
-						}
-						?>
-						</tbody>
-					</table>
-					<p><a href="#" id="wac-add-duration-row" class="button"><?php _e('Add New Row', 'grfwpt'); ?></a></p>
-
-					<!-- Hidden template row -->
-					<table style="display:none;">
-						<tr class="wac-duration-row-template">
-							<td>
-								<input type="text" name="page_durations[]" placeholder="admin page or pattern" />
-							</td>
-							<td>
-								<input type="number" name="page_durations[]" value="" min="0" />
-							</td>
-						</tr>
-					</table>
-
-					<hr>
-					<?php if (!$onlyManually): ?>
-						<?php if ($mode === 'whitelist'): ?>
-							<h2><?php _e('Whitelist: Enabled Pages', 'grfwpt'); ?></h2>
-						<?php else: ?>
-							<h2><?php _e('Blacklist: Excluded Pages', 'grfwpt'); ?></h2>
-						<?php endif; ?>
-						<?php foreach ($allDetectedPages as $page):
-							$checked = ($mode === 'whitelist')
-								? in_array($page, $enabledUrls, true)
-								: in_array($page, $excludedUrls, true);
-							?>
-							<label style="display:block;">
-								<input type="checkbox"
-								       name="<?php echo ($mode === 'whitelist') ? 'enabled_urls[]' : 'excluded_urls[]'; ?>"
-								       value="<?php echo esc_attr($page); ?>"
-									<?php checked($checked, true); ?> />
-								<?php echo esc_html($page); ?>
-							</label>
-						<?php endforeach; ?>
-					<?php else: ?>
-						<p><em><?php _e('Whitelist/Blacklist are disabled because "Only Cache Manually" is on.', 'grfwpt'); ?></em></p>
-					<?php endif; ?>
-
-					<hr>
-					<h2><?php _e('Regex Patterns', 'grfwpt'); ?></h2>
-					<p><?php _e('Regex lines to match admin pages (ignored if "Only Cache Manually" is on).', 'grfwpt'); ?></p>
-					<textarea name="regex_urls" rows="5" cols="70"><?php echo esc_textarea($regexString); ?></textarea>
-				</div><!-- #wac-tab-advanced -->
-
-				<!-- Manual Pages Tab -->
-				<div id="wac-tab-manual" class="wac-tab-content" style="display:none;">
-					<h2><?php _e('Manual Pages', 'grfwpt'); ?></h2>
-					<p><?php _e('Enter one page/URL per line. If "Only Cache Manually" is on, only these lines will be cached. Otherwise, this is ignored.', 'grfwpt'); ?></p>
-					<textarea name="manual_urls" rows="5" cols="70" placeholder="e.g. https://example.com/wp-admin/index.php"><?php echo esc_textarea($manualUrlsStr); ?></textarea>
-					<p class="description"><?php _e('Full or partial admin URLs are allowed. For example, "edit.php?post_type=mytype" or the full domain path. See below for exact vs. partial.', 'grfwpt'); ?></p>
-
-					<hr>
-					<h2><?php _e('Exact Matching for Manual Pages?', 'grfwpt'); ?></h2>
-					<p><?php _e('If enabled, we compare rtrim() of the line vs. the full current admin URL. If disabled, we do partial substring matching for manual lines.', 'grfwpt'); ?></p>
-					<label>
-						<input type="checkbox" name="exact_manual_match" value="1" <?php checked($exactManualMatch, true); ?> />
-						<?php _e('Enable exact matching (no partial substring).', 'grfwpt'); ?>
-					</label>
-				</div><!-- #wac-tab-manual -->
-
-				<p class="submit" style="margin-top:1em;">
-					<input type="submit" name="wp-admin-cache-save-settings" class="button button-primary"
-					       value="<?php _e('Save Settings', 'grfwpt'); ?>" />
-				</p>
-			</form>
-		</div>
-		<?php
+		// Load final settings for display
+		include_once __DIR__ . '/settings-page.php';  // Example: you can put your HTML here
 	}
 
-	/** --------------------------------------
-	 * Full purge events
-	 */
-	private function getPossibleFullPurgeEvents() {
-		return array(
-			'activated_plugin'           => 'Plugin Activated',
-			'deactivated_plugin'         => 'Plugin Deactivated',
-			'upgrader_process_complete'  => 'Plugin/Theme Upgraded',
-			'switch_theme'               => 'Theme Switched',
-			'core_upgrade'               => 'WordPress Core Upgraded',
-			'user_register'              => 'New User Registered',
-			'deleted_user'               => 'User Deleted',
-			'profile_update'             => 'Profile Updated (site-wide purge)',
-			'import_done'                => 'Import Finished (WXR Importer)',
-		);
-	}
-
-	/** --------------------------------------
-	 * User-specific purge events
-	 */
-	private function getPossibleUserPurgeEvents() {
-		return array(
-			'wp_insert_post'   => 'Post Inserted/Created',
-			'save_post'        => 'Post Saved',
-			'widget_update_callback' => 'Widget Updated',
-		);
-	}
-
-	/** --------------------------------------
-	 * Basic validation for manual lines
-	 * We allow partial for "edit.php...", but we do a parse_url check if it starts with http
+	/** ----------------------------------------------------------------
+	 * Validate a manual line
+	 * Also strip scheme for partial unification if you prefer
 	 */
 	private function validateManualLine($line) {
-		// If it starts with http, let's parse it
+		// If it starts with http, parse it
 		if (stripos($line, 'http') === 0) {
 			$parts = @parse_url($line);
-			if (empty($parts['host']) && empty($parts['path'])) {
-				// Possibly invalid
+			if (empty($parts['host']) || empty($parts['scheme'])) {
 				return false;
 			}
-			// If scheme or host is missing, probably invalid
-			if (empty($parts['scheme']) || empty($parts['host'])) {
-				return false;
-			}
-			// otherwise we consider it valid
 			return true;
+		} else {
+			// If not HTTP, we allow partial lines but ensure length >= 2
+			return (strlen($line) >= 2);
 		}
-		// If not, we allow partial like "edit.php?post_type=foo"
-		// Minimal check: ensure there's at least some text
-		if (strlen($line) < 2) {
-			return false;
-		}
-		return true;
 	}
 
-	/** --------------------------------------
-	 * Gather admin pages
+	/** ----------------------------------------------------------------
+	 * detectAdminPages
 	 */
 	public static function detectAdminPages() {
 		global $menu, $submenu;
 		$found = array();
-
 		if (is_array($menu)) {
 			foreach ($menu as $item) {
 				if (!empty($item[2])) {
@@ -684,57 +446,56 @@ class AdminCacheAllSuggestions {
 		return array_values($found);
 	}
 
-	/** --------------------------------------
-	 * Prefetch list
+	/** ----------------------------------------------------------------
+	 * Build prefetch list
 	 */
 	private function getUrlsForPrefetch() {
-		if (empty($this->settings) || empty($this->enabled)) {
+		if (empty($this->enabled)) {
 			return array();
 		}
 		if (!empty($this->settings['only_cache_manually'])) {
 			$manuals = $this->settings['manual-urls'] ?? array();
-			$prefetchList = array();
-			foreach ($manuals as $line) {
-				if (stripos($line, 'http') === 0) {
-					$prefetchList[] = $line;
+			$list = array();
+			foreach ($manuals as $m) {
+				if (stripos($m, 'http') === 0) {
+					$list[] = $m;
 				} else {
-					$prefetchList[] = admin_url($line);
+					$list[] = admin_url($m);
 				}
 			}
-			return $prefetchList;
+			return $list;
 		}
 
-		// otherwise do normal mode
 		$mode        = $this->settings['mode'] ?? 'whitelist';
 		$enabledUrls = $this->settings['enabled-urls'] ?? array();
 		$excluded    = $this->settings['excluded-urls'] ?? array();
-		$regexUrls   = $this->settings['regex-urls'] ?? array();
+		$regexLines  = $this->settings['regex-urls']   ?? array();
+		$urls = array();
 
 		if ($mode === 'blacklist') {
-			$allPages     = self::detectAdminPages();
-			$prefetchList = array();
+			$allPages = self::detectAdminPages();
 			foreach ($allPages as $page) {
-				if (!in_array($page, $excluded, true) && !$this->matchAnyRegex($page, $regexUrls)) {
-					$prefetchList[] = admin_url($page);
+				if (!in_array($page, $excluded, true) && !$this->matchAnyRegex($page, $regexLines)) {
+					$urls[] = admin_url($page);
 				}
 			}
-			return $prefetchList;
 		} else {
-			$prefetchList = array();
+			// whitelist
 			foreach ($enabledUrls as $page) {
-				$prefetchList[] = admin_url($page);
+				$urls[] = admin_url($page);
 			}
-			foreach (self::detectAdminPages() as $possible) {
-				if ($this->matchAnyRegex($possible, $regexUrls)) {
-					$prefetchList[] = admin_url($possible);
+			foreach (self::detectAdminPages() as $p) {
+				if ($this->matchAnyRegex($p, $regexLines)) {
+					$urls[] = admin_url($p);
 				}
 			}
-			return array_unique($prefetchList);
+			$urls = array_unique($urls);
 		}
+		return $urls;
 	}
 
-	/** --------------------------------------
-	 * Hook purge events
+	/** ----------------------------------------------------------------
+	 * Purge events
 	 */
 	public function autoPurgeCache() {
 		$fullEvents = $this->settings['full_purge_events'] ?? array();
@@ -747,84 +508,102 @@ class AdminCacheAllSuggestions {
 		}
 
 		$userEvents = $this->settings['user_purge_events'] ?? array();
-		foreach ($userEvents as $uev) {
-			if ($uev === 'widget_update_callback') {
-				add_filter($uev, array($this, 'widget_update_callback'), 10, 3);
+		foreach ($userEvents as $ue) {
+			if ($ue === 'widget_update_callback') {
+				add_filter($ue, array($this, 'widget_update_callback'), 10, 3);
 			} else {
-				add_action($uev, array($this, 'purgeCurrentUserCache'));
+				add_action($ue, array($this, 'purgeCurrentUserCache'));
 			}
 		}
 
 		if (isset($_GET['lang'])) {
 			$lang = sanitize_text_field($_GET['lang']);
-			if (!isset($_COOKIE['wp-admin-cache-lang']) || $lang != $_COOKIE['wp-admin-cache-lang']) {
+			if (!isset($_COOKIE['wp-admin-cache-lang']) || $lang !== $_COOKIE['wp-admin-cache-lang']) {
 				add_action('admin_init', array($this, 'purgeCurrentUserCache'));
-				setcookie('wp-admin-cache-lang', $lang, 0, admin_url());
+				@setcookie(
+					'wp-admin-cache-lang',
+					$lang,
+					0,
+					COOKIEPATH,
+					COOKIE_DOMAIN,
+					is_ssl(),
+					true
+				);
 			}
 		}
 	}
 
-	/** --------------------------------------
-	 * Purge all
+	/**
+	 * Instead of a large LIKE query, we store cached transient keys in an option named wp_admin_cache_registry.
+	 * Then we simply iterate that registry to purge.
 	 */
 	public function purgeAllCaches() {
-		global $wpdb;
-		$like = $wpdb->esc_like('wp-admin-cached-') . '%';
-		$sql  = "SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s";
-		$results = $wpdb->get_col($wpdb->prepare($sql, '_transient_' . $like));
-
-		foreach ($results as $optionName) {
-			$transientKey = str_replace('_transient_', '', $optionName);
-			delete_transient($transientKey);
+		$registry = get_option('wp_admin_cache_registry', array());
+		if (is_array($registry)) {
+			foreach ($registry as $key) {
+				delete_transient($key);
+			}
 		}
-		$this->debugLog('All caches purged site-wide.');
+		// Reset it
+		update_option('wp_admin_cache_registry', array());
+
+		$this->debugLog('All caches purged site-wide (using registry).');
 	}
 
-	/** --------------------------------------
-	 * Purge current user
+	/**
+	 * Similarly, we read the registry and only remove keys that match the current user's token.
 	 */
 	public function purgeCurrentUserCache() {
-		global $wpdb;
 		$token = $this->getToken();
 		if (!$token) {
 			return;
 		}
-		$like = $wpdb->esc_like('wp-admin-cached-' . $token . '-') . '%';
-		$sql  = "SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s";
-		$results = $wpdb->get_col($wpdb->prepare($sql, '_transient_' . $like));
-
-		foreach ($results as $optionName) {
-			$transientKey = str_replace('_transient_', '', $optionName);
-			delete_transient($transientKey);
+		$registry = get_option('wp_admin_cache_registry', array());
+		$newReg   = array();
+		foreach ($registry as $key) {
+			// The stored key might look like "wp-admin-cached-TOKEN-<md5>".
+			if (strpos($key, 'wp-admin-cached-' . $token . '-') === 0) {
+				delete_transient($key);
+			} else {
+				$newReg[] = $key;
+			}
 		}
-		$this->debugLog('Cache purged for user token: ' . $token);
+		update_option('wp_admin_cache_registry', $newReg);
+
+		$this->debugLog("Cache purged for user token: $token (registry approach).");
 	}
 
-	/** --------------------------------------
-	 * Widget => user purge
-	 */
 	public function widget_update_callback($instance, $new_instance, $old_instance) {
 		$this->purgeCurrentUserCache();
 		return $instance;
 	}
 
-	/** --------------------------------------
-	 * Begin capture
-	 */
 	private function begin() {
 		if ($this->beginStarted) {
 			return;
 		}
+		if (!ob_get_level()) {
+			ob_start(array($this, 'end'));
+		} else {
+			ob_start(array($this, 'end'));
+		}
+
 		$token = $this->getToken();
 		if ($token === '') {
+			$this->debugLog('No session token found; caching disabled for this user.');
 			return;
 		}
 		$this->beginStarted = true;
 
 		$currentFullUrl = add_query_arg(null, null);
-		$relative       = str_replace(admin_url(), '', $currentFullUrl);
+
+		// 1) We unify the scheme by removing "http://" or "https://"
+		$currentFullUrl = preg_replace('/^https?:\/\//i', '', $currentFullUrl);
+
+		$relative = str_replace(preg_replace('/^https?:\/\//i', '', admin_url()), '', $currentFullUrl);
 
 		if (!$this->shouldCache($relative, $currentFullUrl)) {
+			ob_end_flush();
 			return;
 		}
 
@@ -833,6 +612,7 @@ class AdminCacheAllSuggestions {
 			return;
 		}
 
+		// Build the actual transient key
 		$tName   = 'wp-admin-cached-' . $token . '-' . md5($relative);
 		$content = get_transient($tName);
 
@@ -840,18 +620,12 @@ class AdminCacheAllSuggestions {
 			$content = false;
 		}
 
-		if ($content === false) {
-			ob_start(array($this, 'end'));
-			$this->currentCaching = $tName;
-			$this->debugLog('Caching new admin page: ' . $relative);
-		} else {
+		if ($content !== false) {
 			if (isset($_POST['wp_admin_cache_prefetch'])) {
-				if (!isset($_POST['prefetch_nonce']) ||
-				    !wp_verify_nonce($_POST['prefetch_nonce'], 'wp_admin_cache_prefetch_nonce')) {
+				if (!isset($_POST['prefetch_nonce']) || !wp_verify_nonce($_POST['prefetch_nonce'], 'wp_admin_cache_prefetch_nonce')) {
 					die('Invalid nonce');
 				}
-				if (!empty($this->settings['strict-prefetch']) &&
-				    !current_user_can('manage_options')) {
+				if (!empty($this->settings['strict-prefetch']) && !current_user_can('manage_options')) {
 					die('Insufficient capability for prefetch.');
 				}
 				preg_match('/--wp-admin-cached:(.*)--/', $content, $matches);
@@ -864,7 +638,6 @@ class AdminCacheAllSuggestions {
 				$this->debugLog('Prefetch request for: ' . $relative);
 				die();
 			}
-
 			if (!empty($this->settings['show-label']) && $this->settings['show-label'] === '1') {
 				$content = str_replace('</body>', '<div class="wp-admin-cache-label">cached page</div></body>', $content);
 			}
@@ -872,28 +645,25 @@ class AdminCacheAllSuggestions {
 			$this->debugLog('Served cached admin page: ' . $relative);
 			die();
 		}
+		$this->currentCaching = $tName;
+		$this->debugLog('Caching new admin page: ' . $relative);
 	}
 
-	/** --------------------------------------
-	 * End capture
-	 */
 	public function end($content) {
 		if (strpos($content, '</html>') === false) {
 			return $content;
 		}
-
 		$duration = $this->getDurationForCurrentPage();
 
 		$content = str_replace('</body>', '<!--wp-admin-cached:' . time() . '--></body>', $content);
-		set_transient($this->currentCaching, $content, 60 * $duration);
+		// Instead of just set_transient, we also register the key in "wp_admin_cache_registry"
+		$this->setCachedTransient($this->currentCaching, $content, 60 * $duration);
 
 		if (isset($_POST['wp_admin_cache_prefetch'])) {
-			if (!isset($_POST['prefetch_nonce']) ||
-			    !wp_verify_nonce($_POST['prefetch_nonce'], 'wp_admin_cache_prefetch_nonce')) {
+			if (!isset($_POST['prefetch_nonce']) || !wp_verify_nonce($_POST['prefetch_nonce'], 'wp_admin_cache_prefetch_nonce')) {
 				return 'Invalid nonce';
 			}
-			if (!empty($this->settings['strict-prefetch']) &&
-			    !current_user_can('manage_options')) {
+			if (!empty($this->settings['strict-prefetch']) && !current_user_can('manage_options')) {
 				return 'Insufficient capability';
 			}
 			$this->debugLog('Page prefetched, stored for ' . $duration . ' minutes.');
@@ -903,9 +673,19 @@ class AdminCacheAllSuggestions {
 		return $content;
 	}
 
-	/** --------------------------------------
-	 * Should we cache?
+	/**
+	 * Instead of a direct call to set_transient, store the key in registry
 	 */
+	private function setCachedTransient($key, $value, $expire) {
+		set_transient($key, $value, $expire);
+
+		$registry = get_option('wp_admin_cache_registry', array());
+		if (!in_array($key, $registry, true)) {
+			$registry[] = $key;
+			update_option('wp_admin_cache_registry', $registry);
+		}
+	}
+
 	private function shouldCache($relativeUrl, $fullUrl) {
 		// If only_cache_manually is on
 		if (!empty($this->settings['only_cache_manually'])) {
@@ -913,36 +693,26 @@ class AdminCacheAllSuggestions {
 			$exactMatch = !empty($this->settings['exact_manual_match']);
 			foreach ($manualUrls as $line) {
 				if ($exactMatch) {
-					// rtrim match for exact
-					// Check if user typed a full URL or partial
 					if (stripos($line, 'http') === 0) {
-						// full domain
 						if (rtrim($fullUrl, '/') === rtrim($line, '/')) {
-							$this->debugLog('Exact match: fullUrl === line => ' . $line);
+							$this->debugLog('Exact match: ' . $fullUrl . ' == ' . $line);
 							return true;
 						}
 					} else {
-						// partial path
 						$adminRel = rtrim($relativeUrl, '/');
 						$lineRel  = rtrim($line, '/');
 						if ($adminRel === $lineRel) {
-							$this->debugLog('Exact match: relativeUrl === line => ' . $line);
+							$this->debugLog('Exact match (relative): ' . $adminRel . ' == ' . $line);
 							return true;
 						}
 					}
 				} else {
-					// partial substring check
-					if (strpos($fullUrl, $line) !== false) {
-						$this->debugLog('Caching because partial fullUrl matched a manual line: ' . $line);
-						return true;
-					}
-					if (strpos($relativeUrl, $line) !== false) {
-						$this->debugLog('Caching because partial relative matched a manual line: ' . $line);
+					if (false !== strpos($fullUrl, $line) || false !== strpos($relativeUrl, $line)) {
+						$this->debugLog('Partial match: ' . $line);
 						return true;
 					}
 				}
 			}
-			$this->debugLog('Skipping because only_cache_manually is on and no manual line matched: ' . $fullUrl);
 			return false;
 		}
 
@@ -952,8 +722,8 @@ class AdminCacheAllSuggestions {
 			'theme-install.php','customize.php','user-edit.php','profile.php',
 		);
 		foreach ($alwaysSkip as $skip) {
-			if (strpos($relativeUrl, $skip) !== false) {
-				$this->debugLog('Skipping caching because in always-skip: ' . $skip);
+			if (false !== strpos($relativeUrl, $skip)) {
+				$this->debugLog('Skipping caching, always skip: ' . $skip);
 				return false;
 			}
 		}
@@ -966,73 +736,59 @@ class AdminCacheAllSuggestions {
 
 		if ($mode === 'blacklist') {
 			if (in_array($relativeUrl, $excludedUrls, true)) {
-				$this->debugLog('Skipping because blacklisted: ' . $relativeUrl);
+				$this->debugLog('Skipping, blacklisted: ' . $relativeUrl);
 				return false;
 			}
 			if ($this->matchAnyRegex($relativeUrl, $regex)) {
-				$this->debugLog('Skipping because matched exclude regex: ' . $relativeUrl);
+				$this->debugLog('Skipping, matched exclude regex: ' . $relativeUrl);
 				return false;
 			}
-			$this->debugLog('Caching because not blacklisted: ' . $relativeUrl);
 			return true;
 		} else {
 			// whitelist
 			if (in_array($relativeUrl, $enabledUrls, true)) {
-				$this->debugLog('Caching because explicitly in whitelist: ' . $relativeUrl);
 				return true;
 			}
 			if ($strictWL) {
-				$this->debugLog('Strict Whitelist is on, skipping: ' . $relativeUrl);
 				return false;
 			}
 			if ($this->matchAnyRegex($relativeUrl, $regex)) {
-				$this->debugLog('Caching because matched whitelist regex: ' . $relativeUrl);
 				return true;
 			}
-			$this->debugLog('Skipping because not in whitelist nor matched regex: ' . $relativeUrl);
 			return false;
 		}
 	}
 
-	/** --------------------------------------
-	 * Custom durations
-	 */
 	private function getDurationForCurrentPage() {
-		$currentFullUrl = add_query_arg(null, null);
-		$relative       = str_replace(admin_url(), '', $currentFullUrl);
+		// strip scheme for consistent matching
+		$currentFullUrl = preg_replace('/^https?:\/\//i', '', add_query_arg(null, null));
+
+		$relative       = str_replace(preg_replace('/^https?:\/\//i', '', admin_url()), '', $currentFullUrl);
 
 		$defaultDuration = (int)($this->settings['duration'] ?? 5);
 		$pageDurations   = $this->settings['page_durations'] ?? array();
 
 		foreach ($pageDurations as $pageKey => $minutes) {
-			$pageKey = trim($pageKey);
-			if ($pageKey === '') {
-				continue;
-			}
-			if (strpos($relative, $pageKey) !== false) {
-				$this->debugLog('Found partial match for custom duration: ' . $pageKey . ' => ' . $minutes . ' minutes');
+			if (false !== strpos($relative, $pageKey)) {
+				$this->debugLog('Partial match for custom duration: ' . $pageKey . ' => ' . $minutes);
 				return (int)$minutes;
 			}
 		}
 		return $defaultDuration;
 	}
 
-	/** --------------------------------------
-	 * Regex ignoring invalid patterns
-	 */
 	private function matchAnyRegex($url, $patterns) {
-		foreach ($patterns as $pattern) {
-			$pattern = trim($pattern);
-			if ($pattern === '') {
+		foreach ($patterns as $pat) {
+			$pat = trim($pat);
+			if ($pat === '') continue;
+
+			if (!preg_match('/^[@#\/].+[@#\/][imsxeuADSUXJ]*$/', $pat)) {
+				$this->debugLog('Skipping invalid regex (no delimiters): ' . $pat);
 				continue;
 			}
-			$delim = substr($pattern, 0, 1);
-			if ($delim !== '/' && $delim !== '#') {
-				$pattern = '/' . $pattern . '/';
-			}
-			$result = @preg_match($pattern, $url);
+			$result = @preg_match($pat, $url);
 			if ($result === false) {
-				$this->debugLog('Invalid regex pattern: ' . $pattern);
+				$this->debugLog('Regex compile failed: ' . $pat);
 				continue;
 			}
 			if ($result === 1) {
@@ -1042,25 +798,19 @@ class AdminCacheAllSuggestions {
 		return false;
 	}
 
-	/** --------------------------------------
-	 * Get user token
-	 */
 	private function getToken() {
-		return $_COOKIE['wp-admin-cache-session'] ?? '';
+		return isset($_COOKIE['wp-admin-cache-session']) ? sanitize_text_field($_COOKIE['wp-admin-cache-session']) : '';
 	}
 
-	/** --------------------------------------
-	 * Debug log
-	 */
-	private function debugLog($message) {
+	private function debugLog($msg) {
 		if (empty($this->settings['debug-mode'])) {
 			return;
 		}
-		$timestamp = date('Y-m-d H:i:s');
-		$line = "[{$timestamp}] [WPAdminCache] " . $message . "\n";
+		$time = date('Y-m-d H:i:s');
+		$line = "[{$time}] [WPAdminCache] " . $msg . "\n";
 		@error_log($line, 3, $this->debugFile);
 	}
 }
 
-// Instantiate
+// Finally instantiate
 new AdminCacheAllSuggestions();
