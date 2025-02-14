@@ -60,4 +60,4 @@ Provides debug logs (with basic log rotation when exceeding 5MB) for troubleshoo
 
 Optionally moves itself to the top of the active plugins list for optimal operation.
 
-# Add an extra column to the list tables on the Posts and Pages screens.
+# Add an extra column to the list tables on the Posts and Pages screens, as well as Custom Post Types.
