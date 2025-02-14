@@ -77,14 +77,12 @@ class AdminCacheAllSuggestions {
 	}
 
 	/**
-	 * Normalize a URL by stripping the http/https scheme only if present.
+	 * Normalize a URL by stripping any scheme (e.g., http, https, ftp, custom schemes, etc.)
 	 */
 	private function normalizeUrl($url) {
 		$trimmed = trim($url);
-		if ( preg_match('/^(https?):\/\//i', $trimmed) ) {
-			return preg_replace('/^https?:\/\//i', '', $trimmed);
-		}
-		return $trimmed;
+		// Remove any valid scheme per RFC (letters, digits, plus, period, or hyphen)
+		return preg_replace('/^[a-z][a-z0-9+\-.]*:\/\//i', '', $trimmed);
 	}
 
 	/** ----------------------------------------------------------------
@@ -100,40 +98,47 @@ class AdminCacheAllSuggestions {
 		}
 	}
 
-	/** ----------------------------------------------------------------
-	 * maybeInitializeSettings: Merge defaults and initialize the registry.
+	/**
+	 * Multi-site aware initialization of settings and registry.
 	 */
 	public static function maybeInitializeSettings() {
 		$raw = get_option('wp_admin_cache_settings');
 		$settings = is_string($raw) ? json_decode($raw, true) : array();
-		if ( ! is_array($settings) ) {
+		if (!is_array($settings)) {
 			$settings = array();
 		}
 		$defaults = array(
-			'enabled'            => false,
-			'mode'               => 'whitelist',
-			'enabled-urls'       => array(),
-			'excluded-urls'      => array(),
-			'regex-urls'         => array(),
-			'duration'           => 5,
-			'show-label'         => '0',
-			'full_purge_events'  => array(),
-			'user_purge_events'  => array(),
-			'page_durations'     => array(),
-			'debug-mode'         => false,
-			'strict-prefetch'    => false,
-			'strict-whitelist'   => false,
-			'only_cache_manually'=> false,
-			'manual-urls'        => array(),
-			'exact_manual_match' => false
+			'enabled'             => false,
+			'mode'                => 'whitelist',
+			'enabled-urls'        => array(),
+			'excluded-urls'       => array(),
+			'regex-urls'          => array(),
+			'duration'            => 5,
+			'show-label'          => '0',
+			'full_purge_events'   => array(),
+			'user_purge_events'   => array(),
+			'page_durations'      => array(),
+			'debug-mode'          => false,
+			'strict-prefetch'     => false,
+			'strict-whitelist'    => false,
+			'only_cache_manually' => false,
+			'manual-urls'         => array(),
+			'exact_manual_match'  => false
 		);
 		$settings = array_merge($defaults, $settings);
-		if ( empty($settings['enabled-urls']) && $settings['mode'] === 'whitelist' ) {
+		if (empty($settings['enabled-urls']) && $settings['mode'] === 'whitelist') {
 			$detected = self::detectAdminPages();
 			$settings['enabled-urls'] = $detected;
 		}
-		if ( ! is_array(get_option('wp_admin_cache_registry')) ) {
-			update_option('wp_admin_cache_registry', array());
+		// Initialize the registry option in a multisite‐aware way.
+		if (is_multisite()) {
+			if (!is_array(get_site_option('wp_admin_cache_registry'))) {
+				update_site_option('wp_admin_cache_registry', array());
+			}
+		} else {
+			if (!is_array(get_option('wp_admin_cache_registry'))) {
+				update_option('wp_admin_cache_registry', array());
+			}
 		}
 		update_option('wp_admin_cache_settings', json_encode($settings));
 	}
@@ -173,11 +178,26 @@ class AdminCacheAllSuggestions {
 	}
 
 	/**
-	 * Update the registry cache and option.
+	 * Update the registry cache and option using a simple transient lock to reduce race conditions.
 	 */
 	private function updateRegistry($registry) {
+		// Attempt to acquire a lock (with a max number of retries).
+		$maxRetries = 5;
+		$wait = 100000; // 0.1 second in microseconds
+		for ($i = 0; $i < $maxRetries; $i++) {
+			if (false === get_transient('wp_admin_cache_registry_lock')) {
+				set_transient('wp_admin_cache_registry_lock', true, 5);
+				break;
+			}
+			usleep($wait);
+		}
 		$this->registryCache = $registry;
-		update_option('wp_admin_cache_registry', $registry);
+		if (is_multisite()) {
+			update_site_option('wp_admin_cache_registry', $registry);
+		} else {
+			update_option('wp_admin_cache_registry', $registry);
+		}
+		delete_transient('wp_admin_cache_registry_lock');
 	}
 
 	/** ----------------------------------------------------------------
@@ -284,20 +304,21 @@ class AdminCacheAllSuggestions {
 		include_once __DIR__ . '/settings-page.php';
 	}
 
-	/** ----------------------------------------------------------------
-	 * Validate a manual line. For HTTP URLs, ensure scheme and host are present.
+	/**
+	 * Validate a manual URL.
+	 * For full URLs, use filter_var for proper validation;
+	 * allow relative paths (which must begin with "/") if at least 2 characters.
 	 */
 	private function validateManualLine($line) {
-		if (stripos($line, 'http') === 0) {
-			$parts = @parse_url($line);
-			if (empty($parts['host']) || empty($parts['scheme'])) {
-				return false;
-			}
+		$line = trim($line);
+		if (filter_var($line, FILTER_VALIDATE_URL)) {
 			return true;
-		} else {
-			return (strlen($line) >= 2);
+		} elseif (substr($line, 0, 1) === '/' && strlen($line) >= 2) {
+			return true;
 		}
+		return false;
 	}
+
 
 	/** ----------------------------------------------------------------
 	 * detectAdminPages: Return an array of admin page slugs.
@@ -419,8 +440,9 @@ class AdminCacheAllSuggestions {
 		return $instance;
 	}
 
-	/** ----------------------------------------------------------------
+	/**
 	 * Begin capturing output.
+	 * Uses URL parsing to correctly handle custom admin paths.
 	 */
 	private function begin() {
 		if ($this->beginStarted) {
@@ -434,11 +456,17 @@ class AdminCacheAllSuggestions {
 		}
 		$this->beginStarted = true;
 		$currentFullUrl = add_query_arg(null, null);
-		// Unify the scheme by stripping http/https if present.
-		$currentFullUrl = preg_replace('/^https?:\/\//i', '', $currentFullUrl);
-		$adminUrlNoScheme = preg_replace('/^https?:\/\//i', '', admin_url());
-		$relative = str_replace($adminUrlNoScheme, '', $currentFullUrl);
-		if (!$this->shouldCache($relative, $currentFullUrl)) {
+		// Normalize by stripping any scheme.
+		$currentFullUrlNormalized = $this->normalizeUrl($currentFullUrl);
+		$adminUrlNormalized = $this->normalizeUrl(admin_url());
+		// Use parse_url to extract paths (prepend a dummy scheme so parse_url works correctly)
+		$currentParsed = parse_url('http://' . $currentFullUrlNormalized);
+		$adminParsed   = parse_url('http://' . $adminUrlNormalized);
+		$currentPath = isset($currentParsed['path']) ? $currentParsed['path'] : '';
+		$adminPath   = isset($adminParsed['path']) ? $adminParsed['path'] : '';
+		// Remove the admin path from the current path to get a relative URL.
+		$relative = str_replace($adminPath, '', $currentPath);
+		if (!$this->shouldCache($relative, $currentFullUrlNormalized)) {
 			ob_end_flush();
 			return;
 		}
@@ -570,7 +598,8 @@ class AdminCacheAllSuggestions {
 
 	/**
 	 * Write a debug log message if debug mode is on.
-	 * Also, if the debug log file exceeds 5MB, it is cleared.
+	 * If the debug file exceeds 5MB, it is rotated (renamed) rather than simply cleared.
+	 * If the log directory isn’t writable, fallback to PHP’s error_log.
 	 */
 	private function debugLog($message) {
 		if (empty($this->settings['debug-mode'])) {
@@ -578,8 +607,14 @@ class AdminCacheAllSuggestions {
 		}
 		$timestamp = date('Y-m-d H:i:s');
 		$line = "[{$timestamp}] [WPAdminCache] " . $message . "\n";
+		$logDir = dirname($this->debugFile);
+		if (!is_writable($logDir)) {
+			error_log($line);
+			return;
+		}
 		if (file_exists($this->debugFile) && filesize($this->debugFile) > 5 * 1024 * 1024) {
-			file_put_contents($this->debugFile, ""); // Clear log file if over 5MB.
+			rename($this->debugFile, $this->debugFile . '.old');
+			file_put_contents($this->debugFile, "");
 		}
 		@error_log($line, 3, $this->debugFile);
 	}
@@ -633,22 +668,32 @@ class AdminCacheAllSuggestions {
 	}
 
 	/**
-	 * Retrieve the registry from the database.
+	 * Retrieve the registry from the database (multisite‑aware).
 	 */
 	private function getRegistry() {
 		if ($this->registryCache === null) {
-			$this->registryCache = get_option('wp_admin_cache_registry', array());
+			if (is_multisite()) {
+				$this->registryCache = get_site_option('wp_admin_cache_registry', array());
+			} else {
+				$this->registryCache = get_option('wp_admin_cache_registry', array());
+			}
 		}
 		return $this->registryCache;
 	}
 
 	/**
 	 * Determine the cache duration for the current page.
+	 * Uses URL parsing so that custom admin paths are handled properly.
 	 */
 	private function getDurationForCurrentPage() {
-		$currentFullUrl = preg_replace('/^https?:\/\//i', '', add_query_arg(null, null));
-		$adminUrlNoScheme = preg_replace('/^https?:\/\//i', '', admin_url());
-		$relative = str_replace($adminUrlNoScheme, '', $currentFullUrl);
+		$currentFullUrl = add_query_arg(null, null);
+		$currentFullUrlNormalized = $this->normalizeUrl($currentFullUrl);
+		$adminUrlNormalized = $this->normalizeUrl(admin_url());
+		$currentParsed = parse_url('http://' . $currentFullUrlNormalized);
+		$adminParsed   = parse_url('http://' . $adminUrlNormalized);
+		$currentPath = isset($currentParsed['path']) ? $currentParsed['path'] : '';
+		$adminPath   = isset($adminParsed['path']) ? $adminParsed['path'] : '';
+		$relative = str_replace($adminPath, '', $currentPath);
 		$defaultDuration = (int)($this->settings['duration'] ?? 5);
 		$pageDurations = $this->settings['page_durations'] ?? array();
 		foreach ($pageDurations as $pageKey => $minutes) {
@@ -662,11 +707,17 @@ class AdminCacheAllSuggestions {
 
 	/**
 	 * Check URL against an array of regex patterns.
+	 * Patterns longer than 100 characters are skipped to reduce the risk of DOS attacks.
 	 */
 	private function matchAnyRegex($url, $patterns) {
 		foreach ($patterns as $pat) {
 			$pat = trim($pat);
 			if ($pat === '') continue;
+			// Limit pattern length
+			if (strlen($pat) > 100) {
+				$this->debugLog('Skipping regex: pattern too long: ' . $pat);
+				continue;
+			}
 			if (!preg_match('/^[@#\/].+[@#\/][imsxeuADSUXJ]*$/', $pat)) {
 				$this->debugLog('Skipping invalid regex (no delimiters): ' . $pat);
 				continue;
