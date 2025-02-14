@@ -525,7 +525,29 @@ class AdminCacheAllSuggestions {
 		$this->currentCaching = $tName;
 		$this->debugLog('Caching new admin page: ' . $relative);
 	}
-
+	/**
+	 * End capturing output and store the transient.
+	 */
+	public function end($content) {
+		if (strpos($content, '</html>') === false) {
+			return $content;
+		}
+		$duration = $this->getDurationForCurrentPage();
+		$content = str_replace('</body>', '<!--wp-admin-cached:' . time() . '--></body>', $content);
+		$this->setCachedTransient($this->currentCaching, $content, 60 * $duration);
+		if (isset($_POST['wp_admin_cache_prefetch'])) {
+			if (!isset($_POST['prefetch_nonce']) || !wp_verify_nonce($_POST['prefetch_nonce'], 'wp_admin_cache_prefetch_nonce')) {
+				return 'Invalid nonce';
+			}
+			if (!empty($this->settings['strict-prefetch']) && !current_user_can('manage_options')) {
+				return 'Insufficient capability';
+			}
+			$this->debugLog('Page prefetched, stored for ' . $duration . ' minutes.');
+			return 'prefetching:' . (60 * $duration);
+		}
+		$this->debugLog('Page cached for ' . $duration . ' minutes.');
+		return $content;
+	}
 	/**
 	 * Instead of directly calling set_transient, store the key in the registry.
 	 */
