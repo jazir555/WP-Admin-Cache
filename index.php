@@ -10,7 +10,9 @@
   Domain Path: /languages/
   License:
  */
-
+if ( ! defined('ABSPATH') ) {
+	exit;
+}
 // Prevent direct access
 if ( ! defined('WPINC') ) {
 	exit;
@@ -78,8 +80,10 @@ class AdminCacheAllSuggestions {
 	 */
 	private function normalizeUrl($url) {
 		$trimmed = trim($url);
+		// Only strip http and https schemes
 		return preg_replace('/^https?:\/\//i', '', $trimmed);
 	}
+
 
 	/**
 	 * Move plugin to top.
@@ -87,10 +91,14 @@ class AdminCacheAllSuggestions {
 	public static function movePluginAtTop() {
 		$path = str_replace(WP_PLUGIN_DIR . '/', '', __FILE__);
 		$plugins = get_option('active_plugins');
-		if ( is_array($plugins) && ($key = array_search($path, $plugins)) !== false ) {
-			array_splice($plugins, $key, 1);
-			array_unshift($plugins, $path);
-			update_option('active_plugins', $plugins);
+		if (is_array($plugins)) {
+			$key = array_search($path, $plugins);
+			// Only move if not already first
+			if ($key !== false && $key > 0) {
+				array_splice($plugins, $key, 1);
+				array_unshift($plugins, $path);
+				update_option('active_plugins', $plugins);
+			}
 		}
 	}
 
@@ -123,7 +131,7 @@ class AdminCacheAllSuggestions {
 			$detected = self::detectAdminPages();
 			$settings['enabled-urls'] = $detected;
 		}
-		// Always use the per-site registry
+		// Always use the per‑site registry
 		if (!is_array(get_option('wp_admin_cache_registry'))) {
 			update_option('wp_admin_cache_registry', array());
 		}
@@ -341,23 +349,25 @@ class AdminCacheAllSuggestions {
 		if (empty($this->enabled)) {
 			return array();
 		}
+		$urls = array();
 		if (!empty($this->settings['only_cache_manually'])) {
 			$manuals = $this->settings['manual-urls'] ?? array();
-			$list = array();
 			foreach ($manuals as $m) {
+				// If URL begins with "http", include only if it starts with admin_url()
 				if (stripos($m, 'http') === 0) {
-					$list[] = $m;
+					if (strpos($m, admin_url()) === 0) {
+						$urls[] = $m;
+					}
 				} else {
-					$list[] = admin_url($m);
+					$urls[] = admin_url($m);
 				}
 			}
-			return $list;
+			return $urls;
 		}
 		$mode = $this->settings['mode'] ?? 'whitelist';
 		$enabledUrls = $this->settings['enabled-urls'] ?? array();
 		$excluded = $this->settings['excluded-urls'] ?? array();
 		$regexUrls = $this->settings['regex-urls'] ?? array();
-		$urls = array();
 		if ($mode === 'blacklist') {
 			$allPages = self::detectAdminPages();
 			foreach ($allPages as $page) {
